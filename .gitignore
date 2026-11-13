@@ -53,6 +53,9 @@ data/*
 # insurance against it being recreated in here by habit.
 organizers/
 
+# -- personal notes ----------------------------------------------------------------------------
+PLAYBOOK.md
+
 # -- editors and build artifacts ---------------------------------------------------------------
 .idea/
 .vscode/
