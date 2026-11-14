@@ -7,7 +7,7 @@ import numpy as np
 from possession.control import ControlConfig
 from possession.interactions import InteractionConfig, infer_interactions
 from possession.state import decode_state
-from test_contacts import contact_config
+from tests.test_contacts import contact_config
 
 
 class InteractionTests(unittest.TestCase):
