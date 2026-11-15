@@ -85,9 +85,16 @@ def infer_interactions(
         raise ValueError("contact_config must be a ContactConfig")
     ball, players, teams, reset, dead = _tracking_inputs(
         ball_xy_m, player_xy_m, teams, fps, reset, dead)
-    base = estimate_control(ball, players, teams, fps=fps, config=control_config, reset=reset)
     contacts = detect_contacts(ball, players, teams, fps=fps, config=contact_config,
                                reset=reset, dead=dead)
+    breaks = dead.copy()
+    breaks[1:] |= dead[:-1]
+    for event in contacts:
+        breaks[event.frame] = True
+        if event.frame + 1 < len(breaks):
+            breaks[event.frame + 1] = True
+    base = estimate_control(ball, players, teams, fps=fps, config=control_config,
+                            reset=reset, motion_breaks=breaks)
     ball_v, ball_ok = _motion(ball, fps, contact_config.max_ball_speed_mps, reset)
     player_v, player_ok = _motion(players, fps, contact_config.max_player_speed_mps, reset)
     n = len(ball)
@@ -95,21 +102,18 @@ def infer_interactions(
     source = np.full(n, "unknown", dtype="<U24")
     distances = np.full(players.shape[:2], np.inf)
     visible = np.isfinite(ball).all(axis=-1)[:, None] & np.isfinite(players).all(axis=-1)
-    relative = np.full(players.shape[:2], np.inf)
     if visible.any():
         # Index only observed positions so missing coordinates never enter norms.
         frames, slots = np.nonzero(visible)
         distances[frames, slots] = np.linalg.norm(players[frames, slots] - ball[frames], axis=-1)
     valid_motion = player_ok & ball_ok[:, None]
-    relative[valid_motion] = np.linalg.norm(
-        (player_v - ball_v[:, None, :])[valid_motion], axis=-1)
-    compatible = ((distances <= control_config.max_distance_m)
-                  & (relative <= control_config.max_relative_speed_mps))
+    compatible = base.compatible & valid_motion
     for frame in range(n):
         slot = base.track_index[frame]
         if dead[frame] or (slot >= 0 and not valid_motion[frame, slot]):
             labels[frame] = "X"
     source[labels != "X"] = "direct_motion"
+    source[(labels != "X") & base.fit_used] = "fitted_motion"
 
     assessments = []
     contact_at = {event.frame: event for event in contacts}

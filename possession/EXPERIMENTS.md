@@ -84,3 +84,21 @@ and guard propagation into final labels before local input-only execution.
 The saved earlier candidate remains a frozen diagnostic reference. Compare event
 concentration and proxy conflicts without adjusting parameters to erase selected
 match conflicts, force more D, or improve the public score.
+
+The next control experiments isolate two changes. First, supplement accepted
+adjacent-frame control with a short fit of relative position in fully observed,
+contact/reset-bounded windows. Existing accepted direct evidence has priority;
+the distance, relative-speed and opponent-margin gates remain unchanged. Five
+samples and a 0.1 m maximum fit error are unvalidated priors, fixed before local
+execution (the error scale matches the existing contact-fit setting). Synthetic
+checks cover jitter, fast fly-bys, reversals, close opponents, short possessions,
+missing observations, contacts, resets and shared implausible jumps.
+
+Second, enable the existing optional pass-hypothesis promotion in a separate
+configuration. This tests contact/departure/reception evidence without changing
+the dribble velocity requirement. A successful deflection can be observationally
+identical: the permissive policy must expose that counterexample and is not
+claimed to identify intent. Preserve the conservative candidate and the existing
+submission; do not choose among candidates or tune thresholds using public
+labels/scores or desired coverage. Local runs inspect source counts, label
+changes, unknown recovery and possible extra turnovers, split by published halves.
