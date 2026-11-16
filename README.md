@@ -1,3 +1,10 @@
+> **PossessionIQ submission.** Our solution lives in [`possession/`](possession/README.md); the
+> final model is **learned_v6** (fallback: learned_v4), trained only on other matches (IDSSE
+> open data). Technical
+> document: [PossessionIQ.md](PossessionIQ.md). Pinned environment:
+> [requirements-possessioniq.txt](requirements-possessioniq.txt). Everything below this box is
+> the organisers' original challenge README, unchanged.
+
 # More than a Hack 2027 — Phase 1: Ball Possession
 
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)

@@ -32,6 +32,17 @@ class DegradeTests(unittest.TestCase):
         self.assertLess(damaged["segment_median_s"], 120.)
         self.assertGreater(damaged["fast_moves_per_min"], clean["fast_moves_per_min"])
 
+    def test_smooth_ball_keeps_gaps_and_straight_lines(self):
+        ball = np.c_[np.arange(200) * 0.4, np.zeros(200)]
+        ball[50:60] = np.nan
+        out = degrade.smooth_ball(ball)
+        np.testing.assert_array_equal(np.isnan(out), np.isnan(ball))
+        np.testing.assert_allclose(out[80:180], ball[80:180], atol=1e-9)   # interior of a straight line unchanged
+        kink = ball.copy(); kink[120:, 1] = (np.arange(80) * 0.4)            # sharp turn at frame 120
+        smoothed = degrade.smooth_ball(kink)
+        jump = lambda b: np.abs(np.diff(b[110:130, 1], 2)).max()
+        self.assertLess(jump(smoothed), jump(kink))
+
     def test_track_age_counts_continuous_visibility(self):
         players = np.zeros((8, 1, 2))
         players[3, 0] = np.nan

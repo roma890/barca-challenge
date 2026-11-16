@@ -1,5 +1,7 @@
 """Local possession prototype with soft temporal ball-in-play evidence.
 
+HISTORICAL: superseded by learned_v6 (possession.run_learned); not used for the submission.
+
 Run from the repository root with python -m possession.run --help.
 Only aggregate diagnostics are printed. Automatic tagging is read only with
 --smart-tagging. No video, homography, ground truth or reports are read.

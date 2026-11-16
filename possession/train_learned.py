@@ -30,6 +30,14 @@ Recipes:
       match's aggregate tracking statistics), one with the observed ball and one with the
       drifted ball. The labels -- the provider's flags on clean tracking -- are unchanged,
       which is the real test's situation: clean-tracking answers, messy-tracking input.
+  v5  v4 plus two copies whose player tracks get small position hops instead of identity
+      swaps (degrade.damage_players hop mode, matching our match's fast moves: median
+      0.7 m, almost never an exchange between tracks), one with the observed ball and one
+      with the drifted ball. Robust to both kinds of tracking error. Features are held as
+      float32 to fit 42 match copies in memory.
+  v6  v4's copies with every ball smoothed in time (degrade.smooth_ball, 0.24 s Gaussian),
+      matching the smoothing in our match's ball track (velocity-change percentiles). Only
+      the training copies change; the provided match is used as it is.
 """
 
 import argparse
@@ -53,6 +61,12 @@ RECIPES = {
                switch_cost=1.0, dead_switch_cost=7.0),
     "v4": dict(folders=("idsse", "idsse_drift", "idsse_damaged", "idsse_drift_damaged"), context=True,
                control=True, hidden=128, scale=0.15, switch_cost=1.0, dead_switch_cost=7.0),
+    "v5": dict(folders=("idsse", "idsse_drift", "idsse_damaged", "idsse_drift_damaged", "idsse_hop",
+                        "idsse_drift_hop"), context=True, control=True, hidden=128, scale=0.15,
+               switch_cost=1.0, dead_switch_cost=7.0, float32=True),
+    "v6": dict(folders=("idsse", "idsse_drift", "idsse_damaged", "idsse_drift_damaged"), context=True,
+               control=True, hidden=128, scale=0.15, switch_cost=1.0, dead_switch_cost=7.0, float32=True,
+               smooth_ball=True),
 }
 
 
@@ -68,13 +82,17 @@ def load_game(folder, game, config):
     return features, names, truth, features[graded], labels
 
 
-def load_idsse(match, config, drift_seed=None, damage_seed=None):
+def load_idsse(match, config, drift_seed=None, damage_seed=None, hops=False, smooth=False):
     ball, players, teams, period, truth = idsse.load_match(idsse.DATA_DIR, match)
     ball = idsse.observed_ball(ball)
     if damage_seed is not None:
-        players = degrade.damage_players(players, seed=damage_seed)
+        players = (degrade.damage_players(players, seed=damage_seed, switches_per_min=0.,
+                                          hops_per_min=degrade.HOPS_PER_MIN) if hops
+                   else degrade.damage_players(players, seed=damage_seed))
     if drift_seed is not None:
         ball = ball + vm.smooth_drift(len(ball), vm.DRIFT_SD_M, vm.DRIFT_SMOOTH_S, np.random.default_rng(drift_seed))
+    if smooth:
+        ball = degrade.smooth_ball(ball)
     halves = [(int(np.flatnonzero(period == p)[0]), int(np.flatnonzero(period == p)[-1]) + 1)
               for p in np.unique(period)]
     features, names = learned.frame_features(ball, players, teams, fps=idsse.FPS, pitch=idsse.PITCH,
@@ -112,12 +130,16 @@ def main(argv=None):
             if kind.startswith("idsse"):
                 features, names, truth = load_idsse(
                     game, config, 100 + index if "drift" in kind else None,
-                    {"idsse_damaged": 300 + index, "idsse_drift_damaged": 400 + index}.get(kind))
+                    {"idsse_damaged": 300 + index, "idsse_drift_damaged": 400 + index,
+                     "idsse_hop": 300 + index, "idsse_drift_hop": 400 + index}.get(kind),
+                    hops=kind.endswith("hop"), smooth=recipe.get("smooth_ball", False))
                 labels = np.array([vt.STATES.index(state) for state in truth[truth != "X"]])
             else:
                 features, names, truth, _, labels = load_game(dirs[kind], game, config)
             if recipe["context"]:
                 features, context_names = learned.add_context(features, names, base, offsets)
+            if recipe.get("float32"):
+                features = features.astype(np.float32)
             data[kind, game] = (features, truth, features[truth != "X"], labels)
     context_names = context_names if recipe["context"] else names
     decode = {key: recipe[key] for key in ("scale", "switch_cost", "dead_switch_cost")}
@@ -143,14 +165,18 @@ def main(argv=None):
     tail = "; labels from their events (validate_metrica.event_labels); every frame also used with teams swapped"
     if args.recipe == "v1":  # wording kept identical so learned_v1.json regenerates byte for byte
         notes = {"training_data": "Metrica sample games 1 and 2 from {}".format(dirs["degraded"]) + tail}
-    elif args.recipe in ("v3", "v4"):
+    elif args.recipe in ("v3", "v4", "v5", "v6"):
         notes = {"recipe": args.recipe, "training_data": "IDSSE open data (CC BY 4.0, doi 10.6084/m9.figshare.28196177) "
                  "matches {} from {}; labels from the provider's BallStatus/BallPossession flags "
                  "(idsse.labels); ball observed as idsse.observed_ball, each match also with the degraded-copy drift "
                  "(seed 100 + index){}; every frame also used with teams "
-                 "swapped".format(", ".join(recipe["games"]), dirs["idsse"], "" if args.recipe == "v3" else
-                                 "; v4 adds copies with player tracks damaged by degrade.damage_players "
-                                 "(seeds 300 + index, and 400 + index with the drift)")}
+                 "swapped".format(", ".join(recipe["games"]), dirs["idsse"], {"v3": "", "v4": "; v4 adds copies with player tracks damaged by degrade.damage_players "
+                                  "(seeds 300 + index, and 400 + index with the drift)",
+                                  "v5": "; v5 adds copies with player tracks damaged by degrade.damage_players, "
+                                  "identity swaps (seeds 300/400 + index) and position hops (same seeds, hop "
+                                  "mode)",
+                                  "v6": "; v6 uses v4's copies with every ball smoothed in time by degrade.smooth_ball "
+                                  "(0.24 s Gaussian)"}[args.recipe])}
     else:
         sources = " and ".join("{} ({})".format(dirs[kind], kind) for kind in recipe["folders"])
         notes = {"recipe": args.recipe, "training_data": "Metrica sample games {} from {}".format(

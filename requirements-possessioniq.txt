@@ -1,0 +1,5 @@
+# PossessionIQ submission environment (learned_v4 inference and the test suite).
+# The submitted CSV was generated with exactly these versions, CPython 3.13.0, macOS arm64.
+# Tests use the standard library's unittest; pytest is not required.
+numpy==2.5.4
+pandas==3.1.0

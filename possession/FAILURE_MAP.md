@@ -1,5 +1,13 @@
 # Possession model failure map
 
+> **Historical.** This analysis (2026-11-13) is of the rule-based prototype (`state.py`,
+> `control.py`, `interactions.py`, `play_state.py`, `pipeline.py`), which is **superseded**
+> and does not produce the submission. The final model is **learned_v6** (fallback
+> learned_v4); its limitations are
+> in [README.md](README.md) and [PossessionIQ.md](../PossessionIQ.md). Several mechanisms
+> below (e.g. F04 long gaps, F07 one-touch ambiguity) still describe real limits of any
+> position-only method. Kept unchanged below as a record.
+
 Analysis checkpoint: 2026-11-13. This document does not change the model, settings,
 tests, predictions or scoring. It contains source-based findings and invented
 examples only, with no match-specific labels, event times or evaluation results.

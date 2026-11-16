@@ -24,13 +24,20 @@ from .pipeline import write_validated_submission
 from .tracking import load_tracking
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--data-dir", help="bundle root; defaults to games.DATA_DIR")
     parser.add_argument("--output", required=True)
     parser.add_argument("--frames", type=int, default=source_frames("tactical"))
-    args = parser.parse_args(argv)
+    parser.add_argument("--refine-boundaries", action="store_true",
+                        help="EXPERIMENTAL: re-time H<->A boundaries with possession.boundary_refine "
+                             "(off by default; the frozen submission does not use it)")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     try:
         if Path(args.output).exists():
             raise ValueError("output already exists; choose a new path")
@@ -44,6 +51,10 @@ def main(argv=None):
             pitch=tracking.pitch, halves=[(0, second_half), (second_half, args.frames)])
         labels = learned.decode(model, features, scale=model["scale"], switch_cost=model["switch_cost"],
                                 dead_switch_cost=model["dead_switch_cost"])
+        if args.refine_boundaries:
+            from . import boundary_refine
+            labels = boundary_refine.refine(labels, tracking.ball_xy_m, tracking.player_xy_m,
+                                            tracking.teams, fps=tracking.fps)
         write_validated_submission(args.output, labels, n_frames=args.frames)
         print("Official CSV format validation passed for {} rows.".format(args.frames))
         print(json.dumps({state: int(np.sum(labels == state)) for state in ("H", "A", "D")}))

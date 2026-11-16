@@ -1,5 +1,10 @@
 # Development boundary for the temporal play-state prototype
 
+> **Historical.** This log covers the rule-based prototype (`run.py`, `pipeline.py` and the
+> modules it wires together), which is **superseded** and does not produce the submission. The
+> final model is **learned_v6** (fallback learned_v4); see [README.md](README.md) and the technical document
+> [PossessionIQ.md](../PossessionIQ.md). Kept unchanged below as a record of the approach.
+
 The restart-only detector demands an unusually complete preparation/release
 sequence. That is a structural limitation under missing and noisy observations,
 independently of any public-label score. The new hypothesis is that alternative,

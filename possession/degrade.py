@@ -89,3 +89,24 @@ def tracking_stats(players, fps=25.):
     minutes = len(players) / (60 * fps)
     return {"players_per_frame": float(seen.sum(axis=1).mean()), "segment_median_s": float(np.median(lengths)),
             "segment_p10_s": float(np.percentile(lengths, 10)), "fast_moves_per_min": float((speed > 12).sum() / minutes)}
+
+
+BALL_SMOOTH_FRAMES = 6
+
+
+def smooth_ball(ball, sigma_frames=BALL_SMOOTH_FRAMES):
+    """Gaussian smoothing of the ball within visible stretches (never across gaps)."""
+    out = np.array(ball, dtype=float)
+    if sigma_frames <= 0:
+        return out
+    visible = np.isfinite(out).all(axis=1)
+    edges = np.diff(np.r_[0, visible.astype(int), 0])
+    half = int(3 * sigma_frames)
+    kernel = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma_frames) ** 2)
+    for start, stop in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        length = stop - start
+        segment = out[start:stop].copy()
+        weight = np.convolve(np.ones(length), kernel, "full")[half:half + length]
+        for axis in range(2):
+            out[start:stop, axis] = np.convolve(segment[:, axis], kernel, "full")[half:half + length] / weight
+    return out

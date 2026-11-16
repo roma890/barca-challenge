@@ -1,5 +1,8 @@
 """Write a submission from the offline H/A/D Viterbi decoder.
 
+HISTORICAL: these hand-written rule configs (configs/viterbi*.json) are superseded by
+learned_v6 (possession.run_learned), which reuses only the decoder, viterbi._viterbi.
+
 Run from the repository root with python -m possession.run_viterbi --help.
 Prints aggregate diagnostics only; no tagging, video or ground truth is read.
 """

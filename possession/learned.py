@@ -1,5 +1,11 @@
 """Learned frame evidence for the H/A/D Viterbi decoder.
 
+The submitted model is learned_v6 (models/learned_v6.json; fallback learned_v4): an ensemble
+of five 128-unit networks over frame_features + control_features with the v3 context columns,
+trained on IDSSE (train_learned.py, recipe v6 = v4's damaged copies with the training ball
+smoothed by degrade.smooth_ball) and decoded with scale 0.15, switch 1.0, dead switch 7.0. The
+history below describes how the module grew from learned_v1; every version stays loadable.
+
 A multinomial logistic regression turns per-frame features into H/A/D probabilities;
 `scale * (log p(state | x) - log prior)` replaces viterbi.py's hand-written scores and
 the same Viterbi chooses the sequence. Features: ball proximity (v4's team evidence,
