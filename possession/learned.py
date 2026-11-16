@@ -71,7 +71,28 @@ def attack_direction(players, teams, halves, pitch):
     return direction
 
 
-def frame_features(ball, players, teams, *, fps, pitch, halves, config):
+MAX_PLAYER_SPEED_MPS = 12.
+
+
+def _player_velocity(players, fps, robust):
+    """Per-slot velocity; robust drops impossible speeds (a track jumping to another player)."""
+    velocity = _velocity(players, fps)
+    if robust:
+        with np.errstate(invalid="ignore"):
+            velocity[np.linalg.norm(velocity, axis=-1) > MAX_PLAYER_SPEED_MPS] = np.nan
+    return velocity
+
+
+def track_age(players, cap):
+    """Frames each slot has been continuously visible, capped (0 where not visible)."""
+    seen = np.isfinite(players[..., 0])
+    age = np.zeros(seen.shape)
+    for t in range(len(seen)):
+        age[t] = np.where(seen[t], (age[t - 1] + 1) if t else 1, 0)
+    return np.minimum(age, cap)
+
+
+def frame_features(ball, players, teams, *, fps, pitch, halves, config, robust=False):
     """(n, k) feature matrix and column names; missing values become 0 plus a flag column."""
     teams = np.asarray(teams)
     n = len(ball)
@@ -81,7 +102,7 @@ def frame_features(ball, players, teams, *, fps, pitch, halves, config):
     out = {"prox": vt.team_evidence(ball, players, teams, config)}
     for half in (6, 25):
         out["prox_m%d" % half] = rolling_mean(np.where(visible > 0, out["prox"], np.nan), half)
-    ball_v, player_v = _velocity(ball, fps), _velocity(players, fps)
+    ball_v, player_v = _velocity(ball, fps), _player_velocity(players, fps, robust)
     for side in ("H", "A"):
         side_dist = np.where(teams == side, dist, np.inf)
         side_dist = np.where(np.isfinite(side_dist), side_dist, np.inf)
@@ -140,7 +161,7 @@ def add_context(features, names, base=CONTEXT_BASE, offsets=CONTEXT_OFFSETS):
     return np.concatenate(columns, axis=1), out
 
 
-def control_features(ball, players, teams, *, fps):
+def control_features(ball, players, teams, *, fps, robust=False):
     """learned_v3's extra columns: who crowds the ball, the second-nearest player of each
     team, which team is nearest (+1 H / -1 A, raw and smoothed) and ball kicks (acceleration)."""
     teams = np.asarray(teams)
@@ -152,6 +173,10 @@ def control_features(ball, players, teams, *, fps):
         side_dist = np.where((teams == side)[None, :] & np.isfinite(dist), dist, np.inf)
         ordered = np.sort(side_dist, axis=1)
         nearest[side] = ordered[:, 0]
+        if robust:
+            age = track_age(players, cap=fps)
+            slot = side_dist.argmin(axis=1)
+            out["age_" + side] = np.where(known & np.isfinite(ordered[:, 0]), age[np.arange(len(ball)), slot] / fps, np.nan)
         for radius in (2, 5):
             out["n%d_%s" % (radius, side)] = rolling_mean(
                 np.where(known, (ordered < radius).sum(axis=1), np.nan), 3) / 3.
@@ -297,10 +322,11 @@ def decode(model, features, *, scale, switch_cost, dead_switch_cost):
 
 def model_inputs(model, ball, players, teams, *, fps, pitch, halves):
     """Everything a saved model reads, computed from tracking."""
+    robust = bool(model.get("robust"))
     features, names = frame_features(ball, players, teams, fps=fps, pitch=pitch, halves=halves,
-                                     config=model["viterbi_config"])
+                                     config=model["viterbi_config"], robust=robust)
     if model.get("control"):
-        extra, extra_names = control_features(ball, players, teams, fps=fps)
+        extra, extra_names = control_features(ball, players, teams, fps=fps, robust=robust)
         features, names = np.c_[features, extra], names + extra_names
     return model_features(model, features, names)
 
@@ -326,9 +352,10 @@ def _jsonable(value):
 
 
 def save_model(path, model, *, names, config, scale, switch_cost, dead_switch_cost, notes, context=None,
-               control=False):
+               control=False, robust=False):
     payload = {
         "feature_version": FEATURE_VERSION, "feature_names": names, **({"control": True} if control else {}),
+        **({"robust": True} if robust else {}),
         "viterbi_config": asdict(config), "scale": scale, "switch_cost": switch_cost,
         "dead_switch_cost": dead_switch_cost, "notes": notes,
         **({"context": {"base": list(context[0]), "offsets": list(context[1])}} if context else {}),

@@ -25,6 +25,11 @@ Recipes:
       on a ball that sits on the player. v2's features plus control_features, context of
       sixteen columns at +-0.12 s to 2 s, five networks of 128 units, decoded with scale
       0.15, switch 1.0, dead switch 7.0. Held-out scores are per IDSSE match.
+  v4  v3 plus two more copies of every IDSSE match whose player tracks are damaged like
+      ours (degrade.damage_players: track breaks and identity switches calibrated to our
+      match's aggregate tracking statistics), one with the observed ball and one with the
+      drifted ball. The labels -- the provider's flags on clean tracking -- are unchanged,
+      which is the real test's situation: clean-tracking answers, messy-tracking input.
 """
 
 import argparse
@@ -33,6 +38,7 @@ import sys
 
 import numpy as np
 
+from . import degrade
 from . import idsse
 from . import learned
 from . import validate_metrica as vm
@@ -45,6 +51,8 @@ RECIPES = {
                switch_cost=2.0, dead_switch_cost=7.0),
     "v3": dict(folders=("idsse", "idsse_drift"), context=True, control=True, hidden=128, scale=0.15,
                switch_cost=1.0, dead_switch_cost=7.0),
+    "v4": dict(folders=("idsse", "idsse_drift", "idsse_damaged", "idsse_drift_damaged"), context=True,
+               control=True, hidden=128, scale=0.15, switch_cost=1.0, dead_switch_cost=7.0),
 }
 
 
@@ -60,9 +68,11 @@ def load_game(folder, game, config):
     return features, names, truth, features[graded], labels
 
 
-def load_idsse(match, config, drift_seed=None):
+def load_idsse(match, config, drift_seed=None, damage_seed=None):
     ball, players, teams, period, truth = idsse.load_match(idsse.DATA_DIR, match)
     ball = idsse.observed_ball(ball)
+    if damage_seed is not None:
+        players = degrade.damage_players(players, seed=damage_seed)
     if drift_seed is not None:
         ball = ball + vm.smooth_drift(len(ball), vm.DRIFT_SD_M, vm.DRIFT_SMOOTH_S, np.random.default_rng(drift_seed))
     halves = [(int(np.flatnonzero(period == p)[0]), int(np.flatnonzero(period == p)[-1]) + 1)
@@ -100,7 +110,9 @@ def main(argv=None):
     for kind in recipe["folders"]:
         for index, game in enumerate(recipe["games"]):
             if kind.startswith("idsse"):
-                features, names, truth = load_idsse(game, config, 100 + index if kind == "idsse_drift" else None)
+                features, names, truth = load_idsse(
+                    game, config, 100 + index if "drift" in kind else None,
+                    {"idsse_damaged": 300 + index, "idsse_drift_damaged": 400 + index}.get(kind))
                 labels = np.array([vt.STATES.index(state) for state in truth[truth != "X"]])
             else:
                 features, names, truth, _, labels = load_game(dirs[kind], game, config)
@@ -131,12 +143,14 @@ def main(argv=None):
     tail = "; labels from their events (validate_metrica.event_labels); every frame also used with teams swapped"
     if args.recipe == "v1":  # wording kept identical so learned_v1.json regenerates byte for byte
         notes = {"training_data": "Metrica sample games 1 and 2 from {}".format(dirs["degraded"]) + tail}
-    elif args.recipe == "v3":
-        notes = {"recipe": "v3", "training_data": "IDSSE open data (CC BY 4.0, doi 10.6084/m9.figshare.28196177) "
+    elif args.recipe in ("v3", "v4"):
+        notes = {"recipe": args.recipe, "training_data": "IDSSE open data (CC BY 4.0, doi 10.6084/m9.figshare.28196177) "
                  "matches {} from {}; labels from the provider's BallStatus/BallPossession flags "
                  "(idsse.labels); ball observed as idsse.observed_ball, each match also with the degraded-copy drift "
-                 "(seed 100 + index); every frame also used with teams "
-                 "swapped".format(", ".join(recipe["games"]), dirs["idsse"])}
+                 "(seed 100 + index){}; every frame also used with teams "
+                 "swapped".format(", ".join(recipe["games"]), dirs["idsse"], "" if args.recipe == "v3" else
+                                 "; v4 adds copies with player tracks damaged by degrade.damage_players "
+                                 "(seeds 300 + index, and 400 + index with the drift)")}
     else:
         sources = " and ".join("{} ({})".format(dirs[kind], kind) for kind in recipe["folders"])
         notes = {"recipe": args.recipe, "training_data": "Metrica sample games {} from {}".format(
