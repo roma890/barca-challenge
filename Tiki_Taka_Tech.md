@@ -2,9 +2,9 @@
 
 **Team:** Tiki Taka Tech
 
-**Submission:** `evaluation/results/blend_v8.csv`, an equal blend of two models trained only on other
+**Submission:** `evaluation/results/blend_v8_e16.csv`, an equal blend of two models trained only on other
 matches: `possession/models/learned_v8.json` (frame-level network ensemble) and
-`possession/models/bigru_v8.json` (bidirectional GRU), decoded with one Viterbi pass.
+`possession/models/bigru_v8_e16.json` (bidirectional GRU), decoded with one Viterbi pass.
 **Earlier models kept in the repository:** learned_v1-v4, v6 and v7 (learned_v6 was our previous
 submission).
 
@@ -19,8 +19,9 @@ dataset, labelled by the provider's per-frame ball-alive and possession flags, t
 derivation the challenge's ground truth uses. Because our input is uncorrected automatic tracking,
 the training copies are degraded to match label-free summary statistics of the provided tracking,
 including a ball that stays visible for part of each stoppage, as it does in automatic tracking.
-On held-out IDSSE matches degraded this way the submitted blend scores **0.63-0.66 spellF1**
-(0.90-0.92 macroF1), against 0.24 for the published baseline on the challenge match.
+On held-out IDSSE matches degraded this way the blend scored **0.63-0.66 spellF1** (0.90-0.92
+macroF1) with its first GRU, and training the GRU twice as long added a further +0.019 on held-out
+external IDSSE matches (section 7); the published baseline on the challenge match scores 0.24.
 
 ## 2. Approach and why
 
@@ -41,12 +42,12 @@ features plus sixteen of them repeated at -2 s to +2 s (193 inputs). Frames insi
 shorter than 3 s count three times in training, because short possessions are the main source of
 error.
 
-**Model 2, bidirectional GRU (bigru_v8, `possession/sequence.py`).** The same 33 features at 12.5
+**Model 2, bidirectional GRU (bigru_v8_e16, `possession/sequence.py`).** The same 33 features at 12.5
 fps: Linear 33->64 + ReLU, a 2-layer bidirectional GRU (64 units per direction), Linear 128->3. It
-learns its own context from the whole half instead of fixed ±2 s snapshots. Trained with PyTorch
-(`possession/train_sequence.py`); its weights are stored as JSON and inference is plain numpy.
+learns its own context from the whole half instead of fixed ±2 s snapshots. Trained on the external
+IDSSE matches for 16 epochs with PyTorch (`possession/train_sequence.py`); its weights are stored as JSON and inference is plain numpy.
 
-Both models are trained with home and away swapped on every training frame and average their
+Both models are trained on the external IDSSE matches only, with home and away swapped on every training frame and average their
 prediction with the swapped one, so neither team is favoured.
 
 **Decoding.** The two models' log-probabilities are averaged, then a three-state Viterbi over the
@@ -155,7 +156,11 @@ Experiment ensembles of two networks; learned_v6 column from a separate fresh-dr
 beats learned_v8 alone by +0.031 (7 of 7 matches) and learned_v7 by +0.13 on the stoppage
 simulations, and is also best on the old simulation. Per match it ranges from 0.56 to 0.71. It finds
 fewer short possessions than learned_v8 (26% vs 31% of those under 2 s) but places boundaries more
-precisely (F1 at overlap 0.7: 0.53 vs 0.48) and makes about 40% fewer false changes.
+precisely (F1 at overlap 0.7: 0.53 vs 0.48) and makes about 40% fewer false changes. These figures
+use the first GRU (8 epochs). Training it for 16 epochs instead, tested on three held-out external IDSSE matches
+with fresh random draws, added +0.019 spellF1 to the blend (better on 3 of 3 matches and on all four
+stoppage-simulation tests: 0.650 -> 0.665, 0.621 -> 0.641, 0.642 -> 0.663, 0.618 -> 0.638), so the
+submitted GRU is trained for 16 epochs.
 
 Earlier history (old simulation, which flatters every model on stoppages): rules 0.455 and learned_v1
 0.562 on the external Metrica sample games (degraded); learned_v2 0.675; learned_v3 0.708 (clean IDSSE);
@@ -167,7 +172,8 @@ possessions the window is too small to rank models.
 **Kept along the way:** learned evidence instead of rules; context networks; IDSSE training data;
 ball drift; simulated player damage; smoothed ball; short possessions weighted 3× (+0.009, confirmed on
 fresh draws); the stoppage-ball simulation (+0.10 on the stoppage simulations); the bidirectional GRU
-(+0.024 / +0.030 on the old simulation, +0.017 to +0.021 on the stoppage simulations, fresh draws).
+(+0.024 / +0.030 on the old simulation, +0.017 to +0.021 on the stoppage simulations, fresh draws);
+training the GRU for 16 epochs instead of 8 (+0.019).
 
 **Tried and not kept** (each judged on held-out external data): minimum spell length and rescuing
 short spells in the decoder; self-training on the unlabelled test match (+0.008 at best); a
@@ -178,7 +184,7 @@ Tagging; long-window team posture context at ±4 to 15 s (-0.007); twice the tra
 swaps only); re-linking broken player tracks (+0.002); a duration-aware (semi-Markov) decoder (-0.039);
 extra weight on frames near possession changes (no change); a second damage draw; twice as many
 training frames (+0.003); a hand-written decoder rule forbidding stoppages during passing sequences
-(-0.006 to -0.009, and it split stoppages in two).
+(-0.006 to -0.009, and it split stoppages in two); an average of three GRUs with different seeds (+0.002).
 
 **Where every setting comes from.**
 
@@ -188,7 +194,7 @@ training frames (+0.003); a hand-written decoder rule forbidding stoppages durin
 | Team switch cost, score scale | 1.0, 0.15 | chosen on held-out IDSSE when learned_v3 was built (earlier models used 2.0 / 0.2 on the external Metrica sample games); ±50% changes move spellF1 by at most ±0.009 |
 | Frame ensemble size, context | 5 networks of 128 units, ±2 s | chosen on held-out external data during learned_v2/v3 (+0.013 for the finer context and 128 units) |
 | Short-possession weighting | under 3 s, 3× | picked as a reasonable starting value before testing; not adjusted afterwards |
-| GRU design | 64 units, 2 layers, 12.5 fps, 8 epochs, 48 s crops, Adam 2e-3 | picked as a reasonable starting design before testing; not adjusted afterwards |
+| GRU design | 64 units, 2 layers, 12.5 fps, 16 epochs, 48 s crops, Adam 2e-3 | picked as a reasonable starting design before testing with 8 epochs; the training length was then doubled to 16 after a held-out test on external matches (+0.019, 3 of 3 matches); nothing else adjusted |
 | Blend | equal weights | picked as a reasonable default before testing; not adjusted afterwards |
 | Stoppage-ball simulation | collect 1-4 s, pass 6-14 m/s, 25% of stoppages hidden, still ball hidden after 1 s | typical values we set by hand from general football knowledge (not measured from any data), fixed before any model was scored |
 | Degradation levels | section 5 table | label-free match-wide statistics of the provided tracking; live dropouts from the external Metrica sample games |
@@ -203,9 +209,9 @@ training frames (+0.003); a hand-written decoder rule forbidding stoppages durin
 - **The degradation is a simulation.** It matches summary statistics, not the tracker's actual failure
   modes. How often the provided tracker shows the ball during stoppages is bounded but not known
   exactly, which is why two stoppage variants are reported.
-- **Possible false stoppages.** On the provided match, about 10 of the blend's 109 stoppages contain
+- **Possible false stoppages.** On the provided match, about 10 of the blend's 120 stoppages contain
   two or more passes inside the pitch, which suggests slow build-up play occasionally called dead, and
-  a goalkeeper holding the ball while players are slow is labelled dead about half the time (some of
+  a goalkeeper holding the ball while players are slow is labelled dead about 60% of the time (some of
   these are goal-kick set-ups, which are dead).
 - **Convention check.** We did not verify on the provided match that the possession convention
   matches the ground truth's beyond the five-minute correctness check.
@@ -221,10 +227,10 @@ distributed.
 ```bash
 python -m possession.idsse --download --parse          # IDSSE open data, ~2.6 GB into data/external/idsse
 python -m possession.train_learned --recipe v8 --output possession/models/learned_v8.json
-python -m possession.train_sequence --recipe v8 --output possession/models/bigru_v8.json   # PyTorch
+python -m possession.train_sequence --recipe v8 --epochs 16 --output possession/models/bigru_v8_e16.json   # PyTorch
 python -m possession.run_learned --model possession/models/learned_v8.json \
-    --sequence-model possession/models/bigru_v8.json --output evaluation/results/blend_v8.csv
-python evaluation/validate_submission.py evaluation/results/blend_v8.csv
+    --sequence-model possession/models/bigru_v8_e16.json --output evaluation/results/blend_v8_e16.csv
+python evaluation/validate_submission.py evaluation/results/blend_v8_e16.csv
 ```
 
 Both trained models are committed, so the fourth command alone regenerates the submission from the

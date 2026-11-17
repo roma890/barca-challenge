@@ -2,7 +2,7 @@
 
 Frame-by-frame H/A/D labels for the provided match, produced by models trained and validated only
 on **other matches**. The submission is an equal blend of **learned_v8** (frame network ensemble)
-and **bigru_v8** (bidirectional GRU); earlier models (learned_v1-v4, v6, v7) are kept as
+and **bigru_v8_e16** (bidirectional GRU, 16 epochs); earlier models (learned_v1-v4, v6, v7) are kept as
 reproducible references. Full description and results: `Tiki_Taka_Tech.md` at the repository root.
 
 ## Reproduce the submission
@@ -10,9 +10,9 @@ reproducible references. Full description and results: `Tiki_Taka_Tech.md` at th
 ```bash
 python -m possession.idsse --download --parse        # IDSSE open data, ~2.6 GB into data/external/idsse
 python -m possession.train_learned --recipe v8 --output possession/models/learned_v8.json
-python -m possession.train_sequence --recipe v8 --output possession/models/bigru_v8.json   # needs requirements-training.txt
+python -m possession.train_sequence --recipe v8 --epochs 16 --output possession/models/bigru_v8_e16.json   # needs requirements-training.txt
 python -m possession.run_learned --model possession/models/learned_v8.json \
-    --sequence-model possession/models/bigru_v8.json --output evaluation/results/blend_v8.csv
+    --sequence-model possession/models/bigru_v8_e16.json --output evaluation/results/blend_v8_e16.csv
 ```
 
 The committed model files are what `run_learned` reads (numpy only), and it reproduces the CSV byte

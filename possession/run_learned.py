@@ -11,7 +11,7 @@ With --sequence-model, the model's log-probabilities are blended equally with a 
 (possession/sequence.py, numpy inference) before the same Viterbi decoding:
 
     python -m possession.run_learned --model possession/models/learned_v8.json \
-        --sequence-model possession/models/bigru_v8.json --output evaluation/results/blend_v8.csv
+        --sequence-model possession/models/bigru_v8_e16.json --output evaluation/results/blend_v8_e16.csv
 
 Prints aggregate counts only; no tagging, video or ground truth is read.
 """
