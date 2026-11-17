@@ -17,7 +17,12 @@ learned.fit_mlp per seed, exactly what learned.fit_ensemble(stride=1) does on th
 (tests/test_cv_idsse.py checks this bit for bit). Feature thresholds come from
 configs/viterbi_v4.json (physical thresholds only; identical in every viterbi config).
 
+E5 (config e5) is B1 plus extra live-play ball dropout on training copies 1-3 (see hide_ball).
+Extra held-out evaluation copies with live ball hiding (EVAL_MISSING) are scored for any
+finished config from its saved outer models and selected decoders, without retraining:
+
     python -m possession.cv_idsse --config b1 --outer DFL-MAT-J03WMX
+    python -m possession.cv_idsse --config b1 --outer all --extra stress_missing
 """
 
 import argparse
@@ -27,6 +32,7 @@ import resource
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +53,7 @@ SHORT_CONTEXT = (-12, -6, -3, 3, 6, 12)
 CONFIGS = {
     "b1": dict(base=learned.CONTEXT_BASE_V3, offsets=learned.CONTEXT_OFFSETS_V3),
     "e4": dict(base=learned.CONTEXT_BASE_V3, offsets=SHORT_CONTEXT),
+    "e5": dict(base=learned.CONTEXT_BASE_V3, offsets=learned.CONTEXT_OFFSETS_V3, live_dropout=True),
 }
 
 # Domain randomisation, fixed before any v7 evaluation. Wide physical priors for optical /
@@ -78,11 +85,43 @@ DECODER_GRID = tuple((t, total * share, total * (1 - share))
                      for t in TEAM_COSTS for total in DEAD_TOTALS for share in ENTRY_SHARES)
 LEGACY = {"scale": 0.15, "switch_cost": 1.0, "dead_switch_cost": 7.0}
 
+# E5: live-play ball dropout. Training (config e5, copies 1-3 only): after the B1 copy is built
+# (observed ball, player damage, drift, smoothing), extra ball observations are hidden inside
+# live play. Eligible frames: the training match's own live labels AND an observed ball. Labels
+# and frame order are never touched; only ball positions (hence the ball-derived and missingness
+# features) change. Fixed before any E5 training; design input was the B1 missingness diagnostic.
+DROPOUT_RANGES = {
+    "level": (0.0, 0.35),             # uniform; share of eligible frames hidden in addition
+    "contest_weight": (1.0, 10.0),    # log-uniform; how much likelier a gap starts in a contest
+}
+DROPOUT_GAP_FRAMES = (5, 75)          # log-uniform gap length, 0.2-3 s at 25 fps
+CONTEST_M = 3.0                       # contest: a player of each team within 3 m of the ball
+DROPOUT_SEED_OFFSET = 50000           # own RNG stream: train copy seed + 50000
+
+# Held-out evaluation copies with extra live hiding, built on top of the stress copy. Eligible
+# frames are the held-out match's live frames (used only to build the evaluation copy; never seen
+# by any model or by decoder selection). Seed for match index i: seed_base + 10 * i.
+#   stress_missing: DEVELOPMENT benchmark = the B1 diagnostic's "contested 20%" condition (same
+#                   generator and seeds). It was inspected while designing E5.
+#   confirm_a/b:    CONFIRMATION conditions declared before any E5 result and not used in design
+#                   (new seeds, level, contest weight and gap range). Scored only if E5 passes the
+#                   development criteria; the same criteria (+0.010 mean nested spellF1 over B1,
+#                   better on >= 5/7 matches) apply to confirm_a; confirm_b must not be worse on mean.
+EVAL_MISSING = {
+    "stress_missing": dict(level=0.20, contest_weight=10.0, gap_frames=(5, 75), seed_base=7021),
+    "confirm_a": dict(level=0.25, contest_weight=5.0, gap_frames=(10, 100), seed_base=9100),
+    "confirm_b": dict(level=0.15, contest_weight=1.0, gap_frames=(5, 50), seed_base=9200),
+}
+
 ROLE_TRAIN, ROLE_CLEAN, ROLE_STRESS = 1, 2, 3
 
 
 def copy_seed(role, match_index, copy=0):
     return 10000 * role + 100 * match_index + copy
+
+
+def eval_missing_seed(kind, match_index):
+    return EVAL_MISSING[kind]["seed_base"] + 10 * match_index
 
 
 def draw_params(rng):
@@ -137,6 +176,69 @@ def make_copy(parsed, seed, params=None):
             ball = ball + vm.smooth_drift(len(ball), params["drift_sd_m"], params["drift_smooth_s"], rng)
         ball = degrade.smooth_ball(ball, params["ball_sigma_frames"])
     return ball, players
+
+
+def contested_frames(ball, players, teams, radius=CONTEST_M):
+    """Frames where a player of each team is within radius of the observed ball. Geometry only."""
+    d = np.linalg.norm(players - ball[:, None, :], axis=2)           # NaN where ball or player unseen
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)             # all-NaN rows -> NaN -> False
+        near = lambda side: np.nanmin(np.where((teams == side)[None, :], d, np.inf), axis=1) <= radius
+        return near("H") & near("A")
+
+
+def hide_ball(ball, players, teams, eligible, level, contest_weight, rng, gap_frames=DROPOUT_GAP_FRAMES):
+    """Hide ball observations in contiguous gaps restricted to eligible frames.
+
+    Gaps start on eligible frames, contest_weight times likelier in a contest; lengths are
+    log-uniform over gap_frames; ineligible frames inside a gap are left alone. Stops once
+    int(level * eligible.sum()) frames are covered. Takes no labels (the caller decides
+    eligibility). Returns (ball, mask of newly hidden frames).
+    """
+    ball = np.array(ball, dtype=float)
+    eligible = np.asarray(eligible, dtype=bool)
+    n_target = int(level * eligible.sum())
+    hidden = np.zeros(len(ball), bool)
+    if n_target == 0:
+        return ball, hidden
+    weight = eligible * np.where(contested_frames(ball, players, teams), contest_weight, 1.0)
+    weight = weight / weight.sum()
+    lo, hi = np.log(gap_frames[0]), np.log(gap_frames[1])
+    while hidden.sum() < n_target:
+        start = rng.choice(len(ball), p=weight)
+        segment = np.arange(start, min(len(ball), start + int(np.exp(rng.uniform(lo, hi)))))
+        hidden[segment[eligible[segment]]] = True
+    newly = hidden & np.isfinite(ball).all(axis=1)
+    ball[hidden] = np.nan
+    return ball, newly
+
+
+def draw_dropout(rng):
+    lo, hi = DROPOUT_RANGES["contest_weight"]
+    return {"level": float(rng.uniform(*DROPOUT_RANGES["level"])),
+            "contest_weight": float(np.exp(rng.uniform(np.log(lo), np.log(hi))))}
+
+
+def train_copy(parsed, y, match_index, copy, live_dropout=False):
+    """(ball, players, record) for one training copy of one match, from that match's data only."""
+    seed = copy_seed(ROLE_TRAIN, match_index, copy)
+    params = None if copy == 0 else draw_params(np.random.default_rng(seed + 5000))
+    ball, players = make_copy(parsed, seed, params)
+    record = {"seed": seed, "params": params}
+    if live_dropout and copy > 0:
+        rng = np.random.default_rng(seed + DROPOUT_SEED_OFFSET)
+        dropout = draw_dropout(rng)
+        live = np.asarray(y) != vt.STATES.index("D")
+        eligible = live & np.isfinite(ball).all(axis=1)
+        ball, newly = hide_ball(ball, players, parsed["teams"], eligible, rng=rng, **dropout)
+        record["dropout"] = dict(dropout, gap_frames=list(DROPOUT_GAP_FRAMES),
+                                 newly_hidden_share_of_live=float(newly.sum() / max(1, live.sum())))
+    return ball, players, record
+
+
+def train_keys(train_matches):
+    """Store keys of a training set: every copy of every training match (and nothing else)."""
+    return [(m, c) for c in range(TRAIN_COPIES) for m in train_matches]
 
 
 def halves_of(period):
@@ -273,7 +375,10 @@ class Run:
         payload = {"config": self.name, "context_offsets": list(self.setup["offsets"]), "aug_ranges": AUG_RANGES,
                    "stress": STRESS, "swap_radius_m": SWAP_RADIUS_M, "train_copies": TRAIN_COPIES, "stride": STRIDE,
                    "seeds": SEEDS, "hidden": HIDDEN, "decoder_grid": DECODER_GRID, "legacy": LEGACY,
-                   "feature_config": str(FEATURE_CONFIG), "matches": self.matches, "git_head": git("rev-parse", "HEAD"),
+                   "feature_config": str(FEATURE_CONFIG), "matches": self.matches,
+                   "live_dropout": dict(ranges=DROPOUT_RANGES, gap_frames=DROPOUT_GAP_FRAMES, contest_m=CONTEST_M,
+                                        seed_offset=DROPOUT_SEED_OFFSET) if self.setup.get("live_dropout") else None,
+                   "eval_missing": EVAL_MISSING, "git_head": git("rev-parse", "HEAD"),
                    "git_branch": git("branch", "--show-current"), "python": platform.python_version(),
                    "numpy": np.__version__}
         path.write_text(json.dumps(payload, indent=1) + "\n")
@@ -286,6 +391,7 @@ class Run:
         return self.out.parent / "labels" / "{}.npz".format(match)
 
     def build_store(self):
+        records = {}
         for match in self.matches:
             parsed = self.parse(match)
             truth, y = label_indices(parsed)
@@ -293,29 +399,40 @@ class Run:
             if not path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 np.savez_compressed(path, labels=np.array([vt.STATES.index(s) for s in truth], dtype=np.int8))
-            i = self.index[match]
             for copy in range(TRAIN_COPIES):
-                seed = copy_seed(ROLE_TRAIN, i, copy)
-                params = None if copy == 0 else draw_params(np.random.default_rng(seed + 5000))
-                ball, players = make_copy(parsed, seed, params)
+                ball, players, record = train_copy(parsed, y, self.index[match], copy,
+                                                   live_dropout=self.setup.get("live_dropout", False))
+                records["{}/{}".format(match, copy)] = record
                 x, self.base_names, self.names = features(ball, players, parsed, self.config, self.setup)
+                if not np.isfinite(x).all():
+                    raise ValueError("non-finite training features: {} copy {}".format(match, copy))
                 self.store[match, copy] = presample(x, y)
                 del x
             del parsed
             self.log("store: {} ({} copies)".format(match, TRAIN_COPIES))
+        self.out.mkdir(parents=True, exist_ok=True)
+        (self.out / "augmentation.json").write_text(json.dumps(records, indent=1) + "\n")
 
-    def eval_features(self, parsed, match, kind):
+    def eval_copy(self, parsed, match, kind):
+        """(ball, players) of a held-out evaluation copy: clean, stress, or an EVAL_MISSING kind."""
         i = self.index[match]
         if kind == "clean":
-            ball, players = make_copy(parsed, copy_seed(ROLE_CLEAN, i))
-        else:
-            ball, players = make_copy(parsed, copy_seed(ROLE_STRESS, i), STRESS)
-        return features(ball, players, parsed, self.config, self.setup)[0]
+            return make_copy(parsed, copy_seed(ROLE_CLEAN, i))
+        ball, players = make_copy(parsed, copy_seed(ROLE_STRESS, i), STRESS)
+        if kind == "stress":
+            return ball, players
+        spec = EVAL_MISSING[kind]
+        live = label_indices(parsed)[0] != "D"
+        ball, _ = hide_ball(ball, players, parsed["teams"], live, spec["level"], spec["contest_weight"],
+                            np.random.default_rng(eval_missing_seed(kind, i)), gap_frames=spec["gap_frames"])
+        return ball, players
+
+    def eval_features(self, parsed, match, kind):
+        return features(*self.eval_copy(parsed, match, kind), parsed, self.config, self.setup)[0]
 
     # -- models and predictions ----------------------------------------------------------
     def train(self, train_matches):
-        keys = [(m, c) for c in range(TRAIN_COPIES) for m in train_matches]
-        return fit_lowmem(keys, self.store, self.names)
+        return fit_lowmem(train_keys(train_matches), self.store, self.names)
 
     def pred_path(self, tag, target, kind):
         return self.out / "preds" / "{}__{}__{}.npz".format(tag, target, kind)
@@ -398,19 +515,53 @@ class Run:
         (self.out / "log.txt").open("a").write("\n".join(self.log_lines) + "\n")
         return result
 
+    def evaluate_extra(self, outer, kinds):
+        """Score EVAL_MISSING kinds for a finished outer fold: the saved outer model (reloaded from
+        JSON, as for every config) and the decoder already selected on inner STRESS predictions
+        (selection rule unchanged; these copies never enter selection). Writes results/extra_<m>.json."""
+        selected = json.loads((self.out / "results" / "outer_{}.json".format(outer)).read_text())["selected_decoder"]
+        decoder = tuple(selected)
+        model = learned.load_model(self.out / "models" / "outer_{}.json".format(outer))
+        path = self.out / "results" / "extra_{}.json".format(outer)
+        result = json.loads(path.read_text()) if path.exists() else {"outer": outer, "config": self.name,
+                                                                        "selected_decoder": selected, "scores": {}}
+        truth = self.truth(outer)
+        parsed = self.parse(outer)
+        for kind in kinds:
+            log_p = learned.log_probs(model, self.eval_features(parsed, outer, kind))
+            pred_file = self.pred_path("outer_json", outer, kind)
+            pred_file.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(pred_file, log_p=log_p.astype(np.float16), prior=model["prior"])
+            # scored from the full-precision log-probabilities (same for every config)
+            result["scores"][kind] = {"legacy": score(truth, decode(log_p, model["prior"], "legacy")),
+                                      "nested": score(truth, decode(log_p, model["prior"], decoder))}
+            self.log("extra {} {}: nested spellF1 {:.4f}".format(outer[-6:], kind,
+                                                               result["scores"][kind]["nested"]["spell_f1"]))
+        del parsed
+        path.write_text(json.dumps(result, indent=1) + "\n")
+        return result
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", choices=sorted(CONFIGS), required=True)
-    parser.add_argument("--outer", nargs="+", required=True, help="held-out IDSSE match id(s)")
+    parser.add_argument("--outer", nargs="+", required=True, help="held-out IDSSE match id(s), or 'all'")
+    parser.add_argument("--extra", nargs="+", choices=sorted(EVAL_MISSING), default=None,
+                        help="only score these extra held-out copies for finished folds (no training)")
     parser.add_argument("--max-minutes", type=float, default=None)
     args = parser.parse_args(argv)
     run = Run(args.config, max_minutes=args.max_minutes)
-    for outer in args.outer:
+    outers = run.matches if args.outer == ["all"] else args.outer
+    for outer in outers:
         if outer not in run.matches:
             print("FAIL: unknown match {}".format(outer), file=sys.stderr)
             return 1
-    for outer in args.outer:
+    if args.extra:
+        for outer in outers:
+            run.evaluate_extra(outer, args.extra)
+        (run.out / "log.txt").open("a").write("\n".join(run.log_lines) + "\n")
+        return 0
+    for outer in outers:
         result = run.run_outer(outer)
         for kind in ("clean", "stress"):
             for dec in ("legacy", "nested"):

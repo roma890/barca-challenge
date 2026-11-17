@@ -169,5 +169,124 @@ class Scoring(unittest.TestCase):
             self.assertIn(key, result)
 
 
+def runs_of(mask):
+    """(start, stop) of each run of True."""
+    edges = np.diff(np.r_[0, mask.astype(int), 0])
+    return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
+
+
+def synthetic_match(n=6000, seed=0):
+    """Players scattered around a moving ball; stoppages have a frozen ball (IDSSE convention)."""
+    rng = np.random.default_rng(seed)
+    ball = np.cumsum(rng.normal(0, 0.3, size=(n, 2)), axis=0)
+    y = np.zeros(n, np.int64)
+    y[n // 2:] = 1
+    for start in (900, 2500, 4200):
+        y[start:start + 400] = 2
+        ball[start:start + 400] = ball[start]
+    duel = (np.arange(n) // 200) % 3 == 0                 # contests come in phases, as in real duels
+    spread = np.where(duel, 1.0, 15.0)[:, None, None]
+    players = ball[:, None, :] + spread * rng.normal(size=(n, 6, 2))
+    return {"ball": ball, "players": players, "teams": np.array(list("HHHAAA"))}, y
+
+
+class LiveDropout(unittest.TestCase):
+    def setUp(self):
+        self.parsed, self.y = synthetic_match()
+        self.live = self.y != 2
+
+    def hide(self, eligible, level=0.2, weight=5.0, seed=0, **options):
+        p = self.parsed
+        return cv.hide_ball(p["ball"], p["players"], p["teams"], eligible, level, weight,
+                            np.random.default_rng(seed), **options)
+
+    def test_only_eligible_frames_change(self):
+        eligible = self.live & (np.arange(len(self.y)) % 7 != 0)     # holes inside live play too
+        ball, newly = self.hide(eligible)
+        changed = ~np.isfinite(ball).all(axis=1)
+        self.assertTrue(changed.any())
+        self.assertFalse((changed & ~eligible).any())
+        np.testing.assert_array_equal(ball[~changed], self.parsed["ball"][~changed])
+        np.testing.assert_array_equal(newly, changed)                 # input ball fully observed
+
+    def test_amount_and_contiguous_gaps(self):
+        _, newly = self.hide(self.live, level=0.2)
+        target = int(0.2 * self.live.sum())
+        self.assertGreaterEqual(newly.sum(), target)
+        self.assertLess(newly.sum(), target + cv.DROPOUT_GAP_FRAMES[1])   # overshoot < one gap
+        for seed in range(20):                                         # tiny target -> exactly one gap
+            _, newly = self.hide(self.live, level=1.5 / self.live.sum(), seed=seed)
+            gaps = runs_of(newly)
+            self.assertEqual(len(gaps), 1)
+            start, stop = gaps[0]
+            self.assertLess(stop - start, cv.DROPOUT_GAP_FRAMES[1])
+            if stop < len(self.live) and self.live[stop]:              # not cut by a stoppage/end
+                self.assertGreaterEqual(stop - start, cv.DROPOUT_GAP_FRAMES[0])
+
+    def test_contest_preference(self):
+        p = self.parsed
+        contested = cv.contested_frames(p["ball"], p["players"], p["teams"])
+        self.assertTrue(0.05 < contested[self.live].mean() < 0.95)
+        share = [np.mean([self.hide(self.live, level=0.05, weight=w, seed=s)[1][contested].mean() for s in range(10)])
+                 for w in (1.0, 10.0)]
+        self.assertGreater(share[1], 1.2 * share[0])
+
+    def test_zero_level_identity_and_determinism(self):
+        ball, newly = self.hide(self.live, level=0.0)
+        np.testing.assert_array_equal(ball, self.parsed["ball"])
+        self.assertFalse(newly.any())
+        np.testing.assert_array_equal(self.hide(self.live, seed=4)[0], self.hide(self.live, seed=4)[0])
+        self.assertFalse(np.array_equal(np.isnan(self.hide(self.live, seed=4)[0]),
+                                        np.isnan(self.hide(self.live, seed=5)[0])))
+
+    def test_train_copy_labels_untouched_and_b1_copies_identical(self):
+        parsed = dict(self.parsed, period=np.ones(len(self.y)))
+        y_before = self.y.copy()
+        for copy in range(cv.TRAIN_COPIES):
+            b1 = cv.train_copy(parsed, self.y, 2, copy, live_dropout=False)
+            e5 = cv.train_copy(parsed, self.y, 2, copy, live_dropout=True)
+            np.testing.assert_array_equal(self.y, y_before)            # labels and order untouched
+            np.testing.assert_array_equal(b1[1], e5[1])                 # players identical
+            self.assertEqual(b1[0].shape, e5[0].shape)
+            if copy == 0:
+                np.testing.assert_array_equal(b1[0], e5[0])
+                self.assertNotIn("dropout", e5[2])
+                continue
+            seen_b1, seen_e5 = np.isfinite(b1[0]).all(axis=1), np.isfinite(e5[0]).all(axis=1)
+            extra = seen_b1 & ~seen_e5
+            self.assertFalse((extra & ~self.live).any())                # never on dead frames
+            self.assertFalse((seen_e5 & ~seen_b1).any())                # nothing revealed
+            np.testing.assert_array_equal(b1[0][seen_e5], e5[0][seen_e5])
+            params = e5[2]["dropout"]
+            self.assertTrue(0 <= params["level"] <= 0.35 and 1 <= params["contest_weight"] <= 10)
+            self.assertAlmostEqual(extra.sum() / self.live.sum(), params["newly_hidden_share_of_live"])
+
+    def test_dropout_seeds_disjoint_from_every_other_stream(self):
+        train = {cv.copy_seed(cv.ROLE_TRAIN, m, c) for m in range(7) for c in range(cv.TRAIN_COPIES)}
+        dropout = {s + cv.DROPOUT_SEED_OFFSET for s in train}
+        others = train | {s + 5000 for s in train}
+        others |= {cv.copy_seed(r, m) for r in (cv.ROLE_CLEAN, cv.ROLE_STRESS) for m in range(7)}
+        others |= {cv.eval_missing_seed(kind, m) for kind in cv.EVAL_MISSING for m in range(7)}
+        self.assertFalse(dropout & others)
+        self.assertEqual(len(others), 2 * 7 * cv.TRAIN_COPIES + 14 + 7 * len(cv.EVAL_MISSING))
+
+    def test_held_out_matches_never_in_training_keys(self):
+        matches = ["m{}".format(i) for i in range(7)]
+        for outer in matches:
+            for inner in matches:
+                excluded = {outer, inner}
+                keys = cv.train_keys([m for m in matches if m not in excluded])
+                self.assertFalse({m for m, _ in keys} & excluded)
+                self.assertEqual(len(keys), cv.TRAIN_COPIES * (7 - len(excluded)))
+
+    def test_development_benchmark_is_the_diagnostic_condition(self):
+        spec = cv.EVAL_MISSING["stress_missing"]
+        self.assertEqual((spec["level"], spec["contest_weight"], tuple(spec["gap_frames"])), (0.2, 10.0, (5, 75)))
+        self.assertEqual([cv.eval_missing_seed("stress_missing", i) for i in range(7)],
+                         [7000 + 10 * i + int(0.2 * 100) + 1 for i in range(7)])
+        self.assertEqual(cv.CONFIGS["e5"]["offsets"], cv.CONFIGS["b1"]["offsets"])
+        self.assertTrue(cv.CONFIGS["e5"]["live_dropout"] and not cv.CONFIGS["b1"].get("live_dropout"))
+
+
 if __name__ == "__main__":
     unittest.main()

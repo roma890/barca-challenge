@@ -107,3 +107,15 @@ claimed to identify intent. Preserve the conservative candidate and the existing
 submission; do not choose among candidates or tune thresholds using public
 labels/scores or desired coverage. Local runs inspect source counts, label
 changes, unknown recovery and possible extra turnovers, split by published halves.
+
+## v7 research: E5 live-play ball dropout (experimental, not a submission)
+
+`possession/cv_idsse.py --config e5` is the v7 B1 leave-one-match-out IDSSE recipe with one
+change: training copies 1-3 additionally hide ball observations inside live play (share of
+eligible frames uniform 0-35 %, gaps log-uniform 0.2-3 s, gap starts 1-10x (log-uniform) more
+likely when a player of each team is within 3 m of the ball). Eligible frames are the training
+match's own live frames with an observed ball; labels and frame order are unchanged. Copy 0 and
+all B1 augmentation are identical to B1. Ranges, seeds and the held-out evaluation conditions
+(`EVAL_MISSING`: one development benchmark, two confirmation conditions declared before any E5
+result) are fixed in code. Only external IDSSE data is used; no competition data, labels or
+statistics. Results stay in the local, uncommitted `experiments/v7/` folder.
