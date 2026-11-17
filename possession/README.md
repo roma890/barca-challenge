@@ -1,22 +1,23 @@
 # Possession inference
 
-Frame-by-frame H/A/D labels for the provided match, produced by an algorithm trained and
-validated only on **other matches**. The final model is **learned_v6**; the previous model,
-**learned_v4**, is kept as a reproducible fallback.
+Frame-by-frame H/A/D labels for the provided match, produced by models trained and validated only
+on **other matches**. The submission is an equal blend of **learned_v8** (frame network ensemble)
+and **bigru_v8** (bidirectional GRU); earlier models (learned_v1-v4, v6, v7) are kept as
+reproducible references. Full description and results: `Tiki_Taka_Tech.md` at the repository root.
 
 ## Reproduce the submission
 
 ```bash
 python -m possession.idsse --download --parse        # IDSSE open data, ~2.6 GB into data/external/idsse
-python -m possession.train_learned --recipe v6 --output possession/models/learned_v6.json
-python -m possession.run_learned --model possession/models/learned_v6.json \
-    --output evaluation/results/learned_v6.csv
+python -m possession.train_learned --recipe v8 --output possession/models/learned_v8.json
+python -m possession.train_sequence --recipe v8 --output possession/models/bigru_v8.json   # needs requirements-training.txt
+python -m possession.run_learned --model possession/models/learned_v8.json \
+    --sequence-model possession/models/bigru_v8.json --output evaluation/results/blend_v8.csv
 ```
 
-The fallback is the same two commands with `v4` / `learned_v4` in place of `v6` / `learned_v6`.
-The committed model files are what `run_learned` reads; retraining reproduces each byte for
-byte, and `run_learned` reproduces each CSV byte for byte (same machine and numpy build). Both
-commands refuse to overwrite existing files.
+The committed model files are what `run_learned` reads (numpy only), and it reproduces the CSV byte
+for byte. Earlier models: `--recipe v6` / `learned_v6` and so on, without `--sequence-model`.
+All commands refuse to overwrite existing files.
 
 ## How the model works (learned_v4 and learned_v6)
 
@@ -50,7 +51,7 @@ labels and nothing tied to specific frames:
 
 | Statistic (provided match, graded halves) | Value | Reproduced by |
 |---|---|---|
-| Ball visible | 59% | `idsse.observed_ball`: ball hidden where the provider froze it (all dead frames) plus live-play dropouts at the rate measured on the Metrica sample games |
+| Ball visible | 59% | `idsse.observed_ball`: ball hidden where the provider froze it (all dead frames) plus live-play dropouts at the rate measured on the external Metrica sample games |
 | Ball jitter / distance to nearest player | 0.23 m/s / 1.9 m | `validate_metrica.smooth_drift`: smooth 1.2 m drift |
 | Players tracked per frame | 20.5 of 22 | `degrade.damage_players`: track breaks |
 | Track piece lengths | median 35 s (p10 2.6 s) | track breaks drawn from these quantiles |
@@ -77,11 +78,11 @@ made on these numbers only; the public five minutes were scored as a correctness
 | IDSSE held out, smoothed ball, hop damage | - | - | - | - | 0.626 | **0.646** |
 | IDSSE held out, smoothed ball, swap damage | - | - | - | - | 0.602 | **0.615** |
 | IDSSE held out, clean players | - | - | 0.612 | 0.708 | 0.701 | 0.694** |
-| Metrica sample games, degraded | 0.455 | 0.562 | 0.675* | 0.685 | 0.682 | **0.696** |
-| Metrica sample games, clean | 0.544 | 0.612 | 0.713* | 0.740 | 0.736 | 0.730 |
+| External Metrica sample games, degraded | 0.455 | 0.562 | 0.675* | 0.685 | 0.682 | **0.696** |
+| External Metrica sample games, clean | 0.544 | 0.612 | 0.713* | 0.740 | 0.736 | 0.730 |
 | Public window (check only) | 0.447 | 0.469 | 0.568 | 0.544 | 0.667 | 0.578 |
 
-spellF1; * held out within the Metrica sample games (learned_v2 was trained on them); ** smoothed ball. The
+spellF1; * held out within the external Metrica sample games (learned_v2 was trained on them); ** smoothed ball. The
 smoothed-ball rows are the most realistic test (learned_v6 better on 13 of 14 match-tests, with
 fewer false handovers: 8.6 vs 10.2 and 10.9 vs 12.3 per 10 minutes). The public window holds 17
 possessions and is one of the cleanest stretches of the match (ball visible 88% vs 60% typical);
@@ -91,11 +92,11 @@ the gap between learned_v4 and learned_v6 there is two to three possessions.
 
 | Change | Held-out effect | Kept |
 |---|---|---|
-| Learned frame evidence instead of hand-written rules (learned_v1) | Metrica sample games, degraded: 0.455 -> 0.562 | yes |
+| Learned frame evidence instead of hand-written rules (learned_v1) | external Metrica sample games, degraded: 0.455 -> 0.562 | yes |
 | Context window and small networks (learned_v2) | 0.562 -> 0.675 | yes |
-| Train on IDSSE instead of the Metrica sample games (learned_v3) | IDSSE 0.612 -> 0.708 | yes |
+| Train on IDSSE instead of the external Metrica sample games (learned_v3) | IDSSE 0.612 -> 0.708 | yes |
 | Control features, finer context, 128 units | +0.013 | yes |
-| Ball drift augmentation | drifted IDSSE +0.056, degraded Metrica sample games +0.079, clean -0.010 | yes |
+| Ball drift augmentation | drifted IDSSE +0.056, external Metrica sample games (degraded) +0.079, clean -0.010 | yes |
 | Simulated player-track damage (learned_v4) | like ours +0.13, 7/7 matches; clean -0.012 | yes (see note) |
 | Minimum spell length in the decoder | never better | no |
 | Self-training on the unlabelled test match | +0.008 at best | no |
@@ -110,7 +111,7 @@ the gap between learned_v4 and learned_v6 there is two to three possessions.
 | Rescue of short spells in the decoder | -0.001 to -0.036, more false handovers | no |
 | Ball touch (kick) features | +0.012 with a sharp ball, none once the ball is realistic | no |
 | Short-gap track repair | fills almost nothing (breaks are long) | no |
-| Smoothed training ball (learned_v6) | smoothed-ball tests +0.020 hop / +0.013 swap, 13/14; degraded Metrica sample games +0.014 | yes |
+| Smoothed training ball (learned_v6) | smoothed-ball tests +0.020 hop / +0.013 swap, 13/14; external Metrica sample games (degraded) +0.014 | yes |
 | Smart Tagging as evidence | not measurable on other matches | no |
 
 Note on learned_v4: the keep rule fixed beforehand also required clean-input IDSSE to drop by
@@ -131,7 +132,9 @@ stoppage timing look sharper in validation than real tracking allows.
 | File | Purpose |
 |---|---|
 | `learned.py` | features, networks, decoding, model files |
-| `train_learned.py` | training recipes v1-v6 with held-out scores |
+| `train_learned.py` | training recipes v1-v8 with held-out scores |
+| `sequence.py`, `train_sequence.py` | bidirectional GRU: numpy inference, PyTorch training |
+| `stoppage_ball.py` | ball visible during stoppages in IDSSE training copies (recipe v8) |
 | `run_learned.py` | writes the submission CSV from a saved model |
 | `idsse.py`, `validate_metrica.py`, `skillcorner.py` | external data loaders and label rules |
 | `degrade.py` | simulated player-tracking damage and ball smoothing |

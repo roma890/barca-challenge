@@ -38,6 +38,12 @@ Recipes:
   v6  v4's copies with every ball smoothed in time (degrade.smooth_ball, 0.24 s Gaussian),
       matching the smoothing in our match's ball track (velocity-change percentiles). Only
       the training copies change; the provided match is used as it is.
+  v7  v6 with every training frame inside a possession shorter than 3 s used three times
+      (short_possession_mask), because short possessions are the main source of held-out error
+      and make up about 6% of frames. Everything else is v6.
+  v8  v7 with the training ball shown for part of each stoppage (stoppage_ball.observed_ball2):
+      collected, carried and placed for the restart, as automatic tracking does, instead of hidden
+      on every dead frame. Labels are unchanged (still dead).
 """
 
 import argparse
@@ -49,6 +55,7 @@ import numpy as np
 from . import degrade
 from . import idsse
 from . import learned
+from . import stoppage_ball
 from . import validate_metrica as vm
 from . import viterbi as vt
 
@@ -67,7 +74,24 @@ RECIPES = {
     "v6": dict(folders=("idsse", "idsse_drift", "idsse_damaged", "idsse_drift_damaged"), context=True,
                control=True, hidden=128, scale=0.15, switch_cost=1.0, dead_switch_cost=7.0, float32=True,
                smooth_ball=True),
+    "v7": dict(folders=("idsse", "idsse_drift", "idsse_damaged", "idsse_drift_damaged"), context=True,
+               control=True, hidden=128, scale=0.15, switch_cost=1.0, dead_switch_cost=7.0, float32=True,
+               smooth_ball=True, short_weight=3, short_s=3.0),
+    "v8": dict(folders=("idsse", "idsse_drift", "idsse_damaged", "idsse_drift_damaged"), context=True,
+               control=True, hidden=128, scale=0.15, switch_cost=1.0, dead_switch_cost=7.0, float32=True,
+               smooth_ball=True, short_weight=3, short_s=3.0, reveal=True),
 }
+
+
+def short_possession_mask(truth, fps, seconds):
+    """For the labelled (non-X) frames of truth: True inside an H or A run shorter than `seconds`."""
+    truth = np.asarray(truth)
+    mask = np.zeros(len(truth), bool)
+    edges = np.flatnonzero(truth[1:] != truth[:-1]) + 1
+    for start, stop in zip(np.r_[0, edges], np.r_[edges, len(truth)]):
+        if truth[start] in ("H", "A") and stop - start < seconds * fps:
+            mask[start:stop] = True
+    return mask[truth != "X"]
 
 
 def load_game(folder, game, config):
@@ -82,9 +106,10 @@ def load_game(folder, game, config):
     return features, names, truth, features[graded], labels
 
 
-def load_idsse(match, config, drift_seed=None, damage_seed=None, hops=False, smooth=False):
+def load_idsse(match, config, drift_seed=None, damage_seed=None, hops=False, smooth=False, reveal_seed=None):
     ball, players, teams, period, truth = idsse.load_match(idsse.DATA_DIR, match)
-    ball = idsse.observed_ball(ball)
+    ball = (idsse.observed_ball(ball) if reveal_seed is None
+            else stoppage_ball.observed_ball2(ball, players, seed=reveal_seed))
     if damage_seed is not None:
         players = (degrade.damage_players(players, seed=damage_seed, switches_per_min=0.,
                                           hops_per_min=degrade.HOPS_PER_MIN) if hops
@@ -132,7 +157,8 @@ def main(argv=None):
                     game, config, 100 + index if "drift" in kind else None,
                     {"idsse_damaged": 300 + index, "idsse_drift_damaged": 400 + index,
                      "idsse_hop": 300 + index, "idsse_drift_hop": 400 + index}.get(kind),
-                    hops=kind.endswith("hop"), smooth=recipe.get("smooth_ball", False))
+                    hops=kind.endswith("hop"), smooth=recipe.get("smooth_ball", False),
+                    reveal_seed=700 + index if recipe.get("reveal") else None)
                 labels = np.array([vt.STATES.index(state) for state in truth[truth != "X"]])
             else:
                 features, names, truth, _, labels = load_game(dirs[kind], game, config)
@@ -147,6 +173,11 @@ def main(argv=None):
     def train(games):
         x = np.concatenate([data[kind, g][2] for kind in recipe["folders"] for g in games])
         y = np.concatenate([data[kind, g][3] for kind in recipe["folders"] for g in games])
+        if recipe.get("short_weight", 1) > 1:
+            mask = np.concatenate([short_possession_mask(data[kind, g][1], idsse.FPS, recipe["short_s"])
+                                   for kind in recipe["folders"] for g in games])
+            x = np.concatenate([x] + [x[mask]] * (recipe["short_weight"] - 1))
+            y = np.concatenate([y] + [y[mask]] * (recipe["short_weight"] - 1))
         if recipe["context"]:
             return learned.fit_ensemble(x, y, context_names, hidden=recipe.get("hidden", 64))
         return learned.fit_symmetric(x, y, names)
@@ -165,7 +196,7 @@ def main(argv=None):
     tail = "; labels from their events (validate_metrica.event_labels); every frame also used with teams swapped"
     if args.recipe == "v1":  # wording kept identical so learned_v1.json regenerates byte for byte
         notes = {"training_data": "Metrica sample games 1 and 2 from {}".format(dirs["degraded"]) + tail}
-    elif args.recipe in ("v3", "v4", "v5", "v6"):
+    elif args.recipe in ("v3", "v4", "v5", "v6", "v7", "v8"):
         notes = {"recipe": args.recipe, "training_data": "IDSSE open data (CC BY 4.0, doi 10.6084/m9.figshare.28196177) "
                  "matches {} from {}; labels from the provider's BallStatus/BallPossession flags "
                  "(idsse.labels); ball observed as idsse.observed_ball, each match also with the degraded-copy drift "
@@ -176,7 +207,11 @@ def main(argv=None):
                                   "identity swaps (seeds 300/400 + index) and position hops (same seeds, hop "
                                   "mode)",
                                   "v6": "; v6 uses v4's copies with every ball smoothed in time by degrade.smooth_ball "
-                                  "(0.24 s Gaussian)"}[args.recipe])}
+                                  "(0.24 s Gaussian)",
+                                  "v7": "; v7 uses v6's copies with every frame inside a possession shorter than 3 s "
+                                  "used three times (short_possession_mask)",
+                                  "v8": "; v8 is v7 with the ball shown for part of each stoppage "
+                                  "(stoppage_ball.observed_ball2, seed 700 + index) instead of hidden throughout"}[args.recipe])}
     else:
         sources = " and ".join("{} ({})".format(dirs[kind], kind) for kind in recipe["folders"])
         notes = {"recipe": args.recipe, "training_data": "Metrica sample games {} from {}".format(

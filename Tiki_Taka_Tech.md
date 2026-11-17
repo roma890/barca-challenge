@@ -2,52 +2,63 @@
 
 **Team:** Tiki Taka Tech
 
-**Submission:** `evaluation/results/learned_v6.csv` (model `possession/models/learned_v6.json`).
-**Fallback kept in the repository:** learned_v4.
+**Submission:** `evaluation/results/blend_v8.csv`, an equal blend of two models trained only on other
+matches: `possession/models/learned_v8.json` (frame-level network ensemble) and
+`possession/models/bigru_v8.json` (bidirectional GRU), decoded with one Viterbi pass.
+**Earlier models kept in the repository:** learned_v1-v4, v6 and v7 (learned_v6 was our previous
+submission).
 
 ## 1. Summary
 
-We label every frame `H`, `A` or `D` from the automatic tracking (ball and players) alone. A small
-neural-network ensemble turns each frame and its surroundings (±2 s) into probabilities for the
-three states, and a Viterbi decoder picks the most consistent sequence over the match. The networks
-are trained only on **other matches**: seven Bundesliga matches from the open IDSSE dataset, whose
-labels come from the provider's per-frame ball-alive and possession flags, which is the same kind
-of derivation the challenge's ground truth uses. Because our input is uncorrected automatic
-tracking while those matches are clean, the training copies are degraded so that their summary
-statistics match those of the provided tracking. Learned_v6 scores 0.646 / 0.615 spellF1 on
-held-out IDSSE matches degraded that way (two damage types), against 0.24 for the published baseline
-on the challenge match.
+We label every frame `H`, `A` or `D` from the automatic tracking (ball and players) alone. Two
+models turn the tracking into per-frame probabilities for the three states: an ensemble of small
+networks that sees each frame with ±2 s of context, and a bidirectional GRU that reads each half in
+both directions. Their log-probabilities are averaged and a Viterbi decoder picks the most consistent
+sequence. Both are trained only on **other matches**: seven Bundesliga matches from the open IDSSE
+dataset, labelled by the provider's per-frame ball-alive and possession flags, the same kind of
+derivation the challenge's ground truth uses. Because our input is uncorrected automatic tracking,
+the training copies are degraded to match label-free summary statistics of the provided tracking,
+including a ball that stays visible for part of each stoppage, as it does in automatic tracking.
+On held-out IDSSE matches degraded this way the submitted blend scores **0.63-0.66 spellF1**
+(0.90-0.92 macroF1), against 0.24 for the published baseline on the challenge match.
 
 ## 2. Approach and why
 
 **Why learned rather than hand-written rules.** Our first pipelines were hand-written rules (nearest
 player, contact detection, stoppage and restart detectors, then a rule-based Viterbi). On external
-matches with labels they reached 0.455 spellF1 (Metrica sample games, degraded); replacing the
-hand-written evidence with learned evidence lifted the same test to 0.56 and, with context and small
-networks, 0.68. Rules needed many thresholds we could not set without labelled data; a model
-trained on labelled other matches sets them from data.
+matches with labels they reached 0.455 spellF1 (external Metrica sample games, degraded); learned evidence
+lifted the same test to 0.56, and context with small networks to 0.68. Rules needed thresholds we
+could not set without labelled data; models trained on labelled other matches set them from data.
 
 **Frame features** (`possession/learned.py`): which team's players are nearest the ball and by how
-much, ball motion relative to the nearest players, number of players of each team near the ball,
-team movement and shape, the ball's position along each team's attack direction, and dead-ball cues
-(players standing still, ball outside or leaving the pitch, players setting up at a line, ball
-speed, whether the ball is tracked). Sixteen of them are repeated at offsets from -2 s to +2 s
-(0.12 to 2 s), giving 193 inputs per frame.
+much, ball motion relative to the nearest players, players of each team near the ball, team movement
+and shape, the ball's position along each team's attack direction, and dead-ball cues (players
+standing still, ball outside or leaving the pitch, players setting up at a line, ball speed, whether
+the ball is tracked): 33 per frame.
 
-**Frame probabilities.** Five one-hidden-layer networks (128 ReLU units, about 126k parameters in
-total), trained with home and away swapped on every training frame and averaged with the swapped
-prediction at test time, so neither team is favoured. numpy only, no GPU.
+**Model 1, frame ensemble (learned_v8).** Five one-hidden-layer networks (128 ReLU units) on the 33
+features plus sixteen of them repeated at -2 s to +2 s (193 inputs). Frames inside possessions
+shorter than 3 s count three times in training, because short possessions are the main source of
+error.
 
-**Decoding.** A three-state Viterbi over the whole match (`possession/viterbi.py`): frame scores are
-0.15 × (log-probability - log prior), switching team costs 1.0 and entering or leaving dead ball
-costs 7.0. The decoder is what turns noisy frame evidence into whole possessions.
+**Model 2, bidirectional GRU (bigru_v8, `possession/sequence.py`).** The same 33 features at 12.5
+fps: Linear 33->64 + ReLU, a 2-layer bidirectional GRU (64 units per direction), Linear 128->3. It
+learns its own context from the whole half instead of fixed ±2 s snapshots. Trained with PyTorch
+(`possession/train_sequence.py`); its weights are stored as JSON and inference is plain numpy.
+
+Both models are trained with home and away swapped on every training frame and average their
+prediction with the swapped one, so neither team is favoured.
+
+**Decoding.** The two models' log-probabilities are averaged, then a three-state Viterbi over the
+whole match (`possession/viterbi.py`): frame scores are 0.15 × (log-probability - log prior),
+switching team costs 1.0 and entering or leaving dead ball costs 7.0.
 
 ## 3. Assets used and dropped
 
 | Asset | Use |
 |---|---|
-| Automatic tracking (ball and players) | **the only input** to the submitted model |
-| Smart Tagging | **dropped.** Tags are phase windows of 15-35 s (longer than a typical possession), with 24 transition tags for the whole match. Simulated on held-out IDSSE with the same counts and window lengths, even *error-free* tags improved spellF1 by at most +0.002, and any stronger weight lowered it |
+| Automatic tracking (ball and players) | **the only input** to the submitted models |
+| Smart Tagging | **dropped.** Phase windows of 15-35 s (longer than a typical possession), 24 transition tags in the match. Simulated on held-out IDSSE with the same counts and lengths, even *error-free* tags improved spellF1 by at most +0.002 |
 | Tactical / broadcast video | not used |
 | Homography | not used (tracking is already in pitch coordinates) |
 | Public 5-minute ground truth | correctness check only: frame alignment, file format, label meaning |
@@ -58,126 +69,166 @@ No labels from the provided match are used anywhere, and no person labelled anyt
 
 | Dataset | Source and licence | Labels: who and how | Amount | Role |
 |---|---|---|---|---|
-| **IDSSE** | Bassek et al. 2025, *Scientific Data*, doi 10.6084/m9.figshare.28196177, CC BY 4.0 | the data provider's per-frame `BallStatus` and `BallPossession` flags (`possession/idsse.py: labels`) | 7 Bundesliga matches | training (learned_v3 onwards) and leave-one-match-out validation |
+| **IDSSE** | Bassek et al. 2025, *Scientific Data*, doi 10.6084/m9.figshare.28196177, CC BY 4.0 | the data provider's per-frame `BallStatus` and `BallPossession` flags (`possession/idsse.py: labels`) | 7 Bundesliga matches | training and leave-one-match-out validation |
 | **Metrica Sports sample games 1-3** | public GitHub repository metrica-sports/sample-data; three other full matches, **external sample data, not the challenge data** | derived from their open event data by a fixed rule (`possession/validate_metrica.py: event_labels`) | 3 matches | validation; training of the early models learned_v1/v2 only |
-| SkillCorner open data | 20 A-League matches, MIT | the provider's possession field | tried | **dropped**: different convention; adding it lowered held-out IDSSE from 0.705 to 0.601 |
+| SkillCorner open data | 20 A-League matches, MIT | the provider's possession field | tried | **dropped**: different convention; lowered held-out IDSSE from 0.705 to 0.601 |
 
 ## 5. Handling missing and noisy tracking
 
 The test input is uncorrected automatic tracking; the ground truth comes from corrected tracking.
-Training copies of IDSSE are therefore degraded to look like the provided tracking, while their
-labels stay as they are. That is the real test's situation: clean answers, messy input. The
-degradation levels come from **label-free, match-wide summary statistics** of the provided tracking,
-computed by script (rates, percentages and percentiles over the whole match, nothing tied to
-individual frames):
+Training copies of IDSSE are therefore degraded to look like the provided tracking while their labels
+stay as they are: clean answers, messy input, as in the real test. The degradation levels come from
+**label-free, match-wide summary statistics** of the provided tracking, computed by script (rates,
+percentages and percentiles over the whole match, nothing tied to individual frames):
 
 | Statistic of the provided tracking | Value | How the IDSSE training copies reproduce it |
 |---|---|---|
-| Ball tracked | 59% of graded frames | ball hidden where the provider froze it (dead ball) plus live-play dropouts at the rate measured on the Metrica sample games (`idsse.observed_ball`) |
+| Ball tracked | 59% of graded frames | live-play dropouts at the rate measured on the external Metrica sample games, plus the stoppage behaviour below |
+| **Ball visible during stoppages** | visible more than 1.5 m outside the pitch on 1.4% of frames, visible and still for 2 s or more on 1.5% (hiding the ball on every dead frame gives 0.01% and 0%) | `stoppage_ball.observed_ball2`: in most stoppages the ball is collected by a player, carried, passed to the restart taker and placed; one stretch is hidden; a quarter of stoppages stay fully hidden. Gives 0.5% / 0% on IDSSE (a still ball is dropped after a second); a variant keeping still balls gives 1.1% / 3.3%; our match lies between, and both variants were tested (section 7) |
 | Ball jitter, distance ball to nearest player | 0.23 m/s, 1.9 m | slow random drift of the ball, 1.2 m (`validate_metrica.smooth_drift`) |
 | Sharpness of ball velocity changes (0.12 s) | p90 4.3, p99 8.9 m/s (IDSSE: 7.4, 17.9) | ball smoothed in time, 0.24 s Gaussian (`degrade.smooth_ball`) |
 | Players tracked per frame | 20.5 of 22 | track breaks, mean gap 6.5 s (`degrade.damage_players`) |
 | Track piece lengths | median 35 s, p10 2.6 s | piece lengths drawn from these quantiles |
 | Implausible moves (> 12 m/s) | about 15 per minute | identity swaps with a nearby player, 9 per minute |
 
-Each IDSSE match enters training four times: as observed, with ball drift, with damaged players, and
-with both, all with the smoothed ball. The provided match itself is never altered. Inside the model,
-missing values are handled explicitly: features carry a ball-visible flag, player features use the
-players that are tracked, and the decoder carries the last state through stretches without evidence.
+**Why the stoppage ball matters.** Our earlier models (up to learned_v7) were trained with the ball
+hidden on every dead frame, so a visible ball always meant live play, and the models learned exactly
+that shortcut. We confirmed it label-free on the provided match: with the ball tracked more than 3 m
+outside the pitch (1,555 frames, necessarily a stoppage), learned_v6 and learned_v7 labelled **0%**
+of those frames dead, and 0% of the ~10,000 frames with the ball visible while every player stood
+nearly still. The stoppage-ball simulation (`possession/stoppage_ball.py`; its timings and speeds are
+typical values we set by hand from general football knowledge, not measured from any data, and fixed
+before any model was scored) removes
+the shortcut: the submitted blend labels 85% of the outside-the-pitch frames dead, while in clearly
+live play (players moving) it still names the right team for 97% / 87% of frames where one player
+clearly controls the ball, as before.
 
-The results do not hinge on these exact levels: halving or doubling the training damage, or the
-hand-set feature constants (a 1 m margin and 3 m reach around the ball, a 1 s window, and
-1.3 m/s, a typical walking speed, used as the neutral value when no player speeds are
-available), moves held-out spellF1 by at most ±0.005, except doubling the damage,
-which helps one test (+0.020 swap) and leaves the other flat (+0.001 hop).
+Each IDSSE match enters training four times: as observed, with ball drift, with damaged players, and
+with both, all with the smoothed ball and the stoppage-ball model. The provided match is never
+altered. Missing values are handled explicitly: features carry a ball-visible flag, player features
+use the players that are tracked, and the decoder carries the last state through gaps.
+
+The results do not hinge on the exact damage levels or hand-set feature constants (a 1 m margin and
+3 m reach around the ball, a 1 s window, and 1.3 m/s, a typical walking speed, used as the neutral
+value when no player speeds are available): halving or doubling them moves held-out external (IDSSE) spellF1 by at
+most ±0.005, except doubling the damage (+0.020 on one damage type, +0.001 on the other).
 
 ## 6. Possession rules implemented
 
-We did not hand-code a possession definition; the model learns the one encoded by the provider
-flags on IDSSE, which matches the challenge's description of its ground truth (dead where the
-tracking marks the ball dead, otherwise the team the tracking names as owning it). In practice:
+We did not hand-code a possession definition; the models learn the one encoded by the provider flags
+on IDSSE, which matches the challenge's description of its ground truth (dead where the tracking marks
+the ball dead, otherwise the team the tracking names as owning it). In practice:
 
-- **Loose balls and challenges:** possession stays with the team that last had it unless the
-  evidence for the other team is sustained. The switch cost (1.0) means a brief touch, a deflection
-  or a won aerial duel without follow-up control does not change possession.
-- **Restarts and stoppages:** dead ball is its own state with a high entry and exit cost (7.0), so a
-  stoppage needs consistent cues (players stopping, ball out or at a line, set-up shapes). After a
-  restart, the team is decided by the evidence, not carried over from before the stoppage.
+- **Loose balls and challenges:** possession stays with the team that last had it unless the evidence
+  for the other team is sustained (switch cost 1.0), so a brief touch, a deflection or a won aerial
+  duel without follow-up control does not change possession.
+- **Restarts and stoppages:** dead ball is its own state with a high entry and exit cost (7.0). A
+  stoppage is recognised from consistent cues (players slowing, the ball out, carried or set at a
+  line), not from whether the ball is visible. After a restart the team is decided by the evidence.
 - **Dead-ball ownership:** never labelled; dead frames are `D`.
 - **`X`:** not used; every frame gets `H`, `A` or `D`.
 
 ## 7. Validation and results
 
-Leave-one-match-out on IDSSE: train on six matches, score the seventh, for all seven. The test copies
-are degraded with the same simulator but different random draws, in two variants of player damage
-(identity swaps, or small position hops), because which one our tracking resembles more cannot be
-told from label-free statistics. Keep rules were fixed before each experiment: at least +0.01 mean
-spellF1, better on at least 5 of 7 matches, bootstrap over matches at least 80% in favour, swap test
-no worse than -0.005, and no material rise in false possession changes.
+Leave-one-match-out on IDSSE: train on six matches, score the seventh, for all seven. Test copies use
+random draws never used in training, two kinds of player damage (identity swaps, small position hops)
+and three ball simulations: **old** (ball hidden on every dead frame, the simulation used up to
+learned_v7), **stoppage** (`stoppage_ball` as above) and **stoppage, still ball kept**. The two
+stoppage simulations resemble the provided tracking (section 5); the old one is optimistic, because it
+hides the ball exactly when play stops. Keep rules were fixed before each experiment (at least +0.01
+mean spellF1, better on at least 5 of 7 matches, bootstrap over matches at least 80%, no material loss
+elsewhere); the changes adopted in the final round (short-possession weighting, stoppage ball,
+GRU) were re-checked on fresh random draws.
 
-| Held-out spellF1 | rules (Viterbi) | learned_v1 | learned_v2 | learned_v3 | learned_v4 | **learned_v6** |
-|---|---|---|---|---|---|---|
-| IDSSE, degraded, hop damage | - | - | - | - | 0.626 | **0.646** |
-| IDSSE, degraded, swap damage | - | - | - | - | 0.602 | **0.615** |
-| IDSSE, clean players | - | - | 0.612 | 0.708 | 0.701 | 0.694 |
-| Metrica sample games, degraded | 0.455 | 0.562 | 0.675* | 0.685 | 0.682 | **0.696** |
-| Metrica sample games, clean | 0.544 | 0.612 | 0.713* | 0.740 | 0.736 | 0.730 |
+| Held-out spellF1 (7 IDSSE matches, fresh draws) | learned_v6 recipe | learned_v7 recipe | learned_v8 recipe | **Submitted blend** |
+|---|---|---|---|---|
+| Stoppage simulation, hop damage | 0.524 | 0.529 | 0.630 | **0.662** |
+| Stoppage simulation, swap damage | 0.498 | 0.506 | 0.593 | **0.636** |
+| Stoppage, still ball kept, hop | 0.513 | 0.523 | 0.622 | **0.654** |
+| Stoppage, still ball kept, swap | 0.490 | 0.504 | 0.588 | **0.628** |
+| Old simulation, hop | 0.645 | 0.655 | 0.642 | **0.670** |
+| Old simulation, swap | 0.615 | 0.627 | 0.607 | **0.648** |
+| macroF1, stoppage simulations | - | 0.76-0.81 | 0.88-0.90 | **0.90-0.92** |
+| False possession changes per 10 min, stoppage simulations | 13-16 | 18-20 | 13-14 | **8-9** |
 
-\* held out within the Metrica sample games, on which learned_v2 was trained.
+Experiment ensembles of two networks; learned_v6 column from a separate fresh-draw run. The blend
+beats learned_v8 alone by +0.031 (7 of 7 matches) and learned_v7 by +0.13 on the stoppage
+simulations, and is also best on the old simulation. Per match it ranges from 0.56 to 0.71. It finds
+fewer short possessions than learned_v8 (26% vs 31% of those under 2 s) but places boundaries more
+precisely (F1 at overlap 0.7: 0.53 vs 0.48) and makes about 40% fewer false changes.
 
-Learned_v6 beats learned_v4 on 13 of 14 held-out match tests and makes fewer false possession
-changes (8.6 vs 10.2 and 10.9 vs 12.3 per 10 minutes). On the public five minutes, used only as a
-check, the file is well formed and aligned; with 17 possessions that window is too small to rank
-models (the difference between learned_v4 and learned_v6 there is two to three possessions).
+Earlier history (old simulation, which flatters every model on stoppages): rules 0.455 and learned_v1
+0.562 on the external Metrica sample games (degraded); learned_v2 0.675; learned_v3 0.708 (clean IDSSE);
+learned_v4 0.626 / 0.602 and learned_v6 0.646 / 0.615 on damaged IDSSE (hop / swap).
 
-**Tried and not kept** (each judged on held-out external data against the rules above): minimum
-spell length in the decoder; rescuing short spells; self-training on the unlabelled test match
-(+0.008 at best); a second-stage model on first-stage probabilities (+0.002 to +0.005); a temporal
-convolution network (0.589 vs 0.622); a turnover detector driving a per-frame switch cost (+0.005);
-ball-touch features (no gain once the ball is realistic); short-gap track repair; robust velocity
-and track-age features; 256 units (no change); decoder settings (dead switch cost flat from 3.5 to
-14; scale and switch cost within ±0.009 of the chosen values); SkillCorner data; Smart Tagging;
-long-window team posture context at ±4 to 15 s (-0.007 hop, -0.004 swap); twice the training damage
-(+0.020 swap but +0.001 hop), training on both damage levels, and blends of these with learned_v6
-(+0.014 swap, +0.001 hop) -- none reached the bar on the hop test, whose position errors resemble
-our tracking's most; re-linking broken player tracks across gaps of up to 15 s at sprint speed
-(+0.002 hop, +0.003 swap); a duration-aware (semi-Markov) decoder using the training matches'
-possession lengths (-0.039, it suppressed short possessions); extra weight on frames near possession
-changes (no change); a second independent damage draw (+0.018 swap, -0.006 hop); twice as many
-training frames (+0.003 hop).
+On the public five minutes, used only as a check, every file is well formed and aligned; with 17
+possessions the window is too small to rank models.
+
+**Kept along the way:** learned evidence instead of rules; context networks; IDSSE training data;
+ball drift; simulated player damage; smoothed ball; short possessions weighted 3× (+0.009, confirmed on
+fresh draws); the stoppage-ball simulation (+0.10 on the stoppage simulations); the bidirectional GRU
+(+0.024 / +0.030 on the old simulation, +0.017 to +0.021 on the stoppage simulations, fresh draws).
+
+**Tried and not kept** (each judged on held-out external data): minimum spell length and rescuing
+short spells in the decoder; self-training on the unlabelled test match (+0.008 at best); a
+second-stage model (+0.002 to +0.005); a temporal convolution network (0.589 vs 0.622); a turnover
+detector driving a per-frame switch cost (+0.005); ball-touch features; robust velocity and track-age
+features; 256 units; decoder settings (dead switch cost flat from 3.5 to 14); SkillCorner data; Smart
+Tagging; long-window team posture context at ±4 to 15 s (-0.007); twice the training damage (+0.020 on
+swaps only); re-linking broken player tracks (+0.002); a duration-aware (semi-Markov) decoder (-0.039);
+extra weight on frames near possession changes (no change); a second damage draw; twice as many
+training frames (+0.003); a hand-written decoder rule forbidding stoppages during passing sequences
+(-0.006 to -0.009, and it split stoppages in two).
+
+**Where every setting comes from.**
+
+| Setting | Value | Source |
+|---|---|---|
+| Dead-ball switch cost | 7.0 | introduced with learned_v1 on the external Metrica sample games and kept since; on held-out IDSSE spellF1 is flat from 3.5 to 14 |
+| Team switch cost, score scale | 1.0, 0.15 | chosen on held-out IDSSE when learned_v3 was built (earlier models used 2.0 / 0.2 on the external Metrica sample games); ±50% changes move spellF1 by at most ±0.009 |
+| Frame ensemble size, context | 5 networks of 128 units, ±2 s | chosen on held-out external data during learned_v2/v3 (+0.013 for the finer context and 128 units) |
+| Short-possession weighting | under 3 s, 3× | fixed before the experiment that tested it; not searched |
+| GRU design | 64 units, 2 layers, 12.5 fps, 8 epochs, 48 s crops, Adam 2e-3 | fixed before its first run; never changed |
+| Blend | equal weights | fixed before the experiment that tested it |
+| Stoppage-ball simulation | collect 1-4 s, pass 6-14 m/s, 25% of stoppages hidden, still ball hidden after 1 s | typical values we set by hand from general football knowledge (not measured from any data), fixed before any model was scored |
+| Degradation levels | section 5 table | label-free match-wide statistics of the provided tracking; live dropouts from the external Metrica sample games |
+| Feature constants | 1 m, 3 m, 1 s, 1.3 m/s, 12 m/s | physical choices; halving or doubling changes held-out external (IDSSE) spellF1 by at most ±0.005 |
+| Random seeds | fixed per copy (100+, 300+, 400+, 700+ match index; 0 for networks) | arbitrary, recorded in the code |
 
 ## 8. Limitations
 
-- **Short possessions.** Possessions under 2 s are recovered only about 22-25% of the time. Of the missed
-  ones on held-out IDSSE, about a third are detected and then merged by the decoder; for about half,
-  the tracking itself carries no usable evidence (ball missing, ball positioned about 2 m off, or an
-  opponent nearer the ball than the player in control). Diagnostics: perfect possession boundaries
-  would add +0.11 spellF1, correct teams +0.06, perfect stoppage timing +0.008.
-- **Validation is somewhat optimistic about stoppages:** the IDSSE ball is frozen exactly on dead
-  frames, so hiding it makes stoppages easier to time than in real tracking.
-- **The degradation is a simulation.** It matches summary statistics, not the tracker's actual
-  failure modes; which player-damage type (swaps or hops) our tracking resembles is unknown, so both
-  are reported.
-- **Convention check.** We did not verify on the provided match that the model's possession
-  convention matches the ground truth's beyond the five-minute correctness check.
-- **With more time:** ball detection from the tactical video with a detector trained elsewhere to
-  fill missing ball positions (the main source of missing evidence), validated on other matches with
-  video; and longer-window team posture features.
+- **Short possessions.** About a quarter of possessions under 2 s are recovered. On held-out IDSSE,
+  for about half of the missed ones the tracking carries no usable evidence (ball missing, ball about
+  2 m off, or an opponent nearer the ball than the player in control).
+- **The degradation is a simulation.** It matches summary statistics, not the tracker's actual failure
+  modes. How often the provided tracker shows the ball during stoppages is bounded but not known
+  exactly, which is why two stoppage variants are reported.
+- **Possible false stoppages.** On the provided match, about 10 of the blend's 109 stoppages contain
+  two or more passes inside the pitch, which suggests slow build-up play occasionally called dead, and
+  a goalkeeper holding the ball while players are slow is labelled dead about half the time (some of
+  these are goal-kick set-ups, which are dead).
+- **Convention check.** We did not verify on the provided match that the possession convention
+  matches the ground truth's beyond the five-minute correctness check.
+- **With more time:** ball detection from the tactical video with a detector trained elsewhere,
+  validated on other matches with video; a learned refinement of possession boundaries.
 
 ## 9. Reproduction
 
-Requirements: Python 3.9, numpy 2.0.2 (`requirements.txt` at the repository root for evaluation;
-pandas 2.3.3). The challenge data bundle in `data/` as distributed.
+Requirements: Python 3.9, `requirements.txt` (numpy 2.0.2, pandas 2.3.3). Retraining the GRU also
+needs `requirements-training.txt` (PyTorch 2.5.1, CPU). The challenge data bundle in `data/` as
+distributed.
 
 ```bash
-python -m possession.idsse --download --parse        # IDSSE open data, ~2.6 GB into data/external/idsse
-python -m possession.train_learned --recipe v6 --output possession/models/learned_v6.json
-python -m possession.run_learned --model possession/models/learned_v6.json \
-    --output evaluation/results/learned_v6.csv
-python evaluation/validate_submission.py evaluation/results/learned_v6.csv
+python -m possession.idsse --download --parse          # IDSSE open data, ~2.6 GB into data/external/idsse
+python -m possession.train_learned --recipe v8 --output possession/models/learned_v8.json
+python -m possession.train_sequence --recipe v8 --output possession/models/bigru_v8.json   # PyTorch
+python -m possession.run_learned --model possession/models/learned_v8.json \
+    --sequence-model possession/models/bigru_v8.json --output evaluation/results/blend_v8.csv
+python evaluation/validate_submission.py evaluation/results/blend_v8.csv
 ```
 
-The trained model is committed, so the third command alone regenerates the submission from the
-provided data. Retraining reproduces the model file byte for byte, and `run_learned` reproduces the
-CSV byte for byte, on the same machine and numpy build. All randomness has fixed seeds. Both commands
-refuse to overwrite existing files. Fallback: replace `v6` / `learned_v6` with `v4` / `learned_v4`.
+Both trained models are committed, so the fourth command alone regenerates the submission from the
+provided data with numpy only, byte for byte (verified twice, and from a fresh clone of the
+repository). The frame ensemble is plain numpy with fixed seeds and retrains to the same file;
+the GRU's PyTorch training is seeded but multi-threaded, so a retrained GRU is close to, not
+bit-identical with, the committed one. All commands refuse to overwrite existing files.

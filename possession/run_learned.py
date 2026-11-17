@@ -7,6 +7,12 @@
     python -m possession.run_learned --model possession/models/learned_v3.json \
         --output evaluation/results/learned_v3.csv
 
+With --sequence-model, the model's log-probabilities are blended equally with a bidirectional GRU
+(possession/sequence.py, numpy inference) before the same Viterbi decoding:
+
+    python -m possession.run_learned --model possession/models/learned_v8.json \
+        --sequence-model possession/models/bigru_v8.json --output evaluation/results/blend_v8.csv
+
 Prints aggregate counts only; no tagging, video or ground truth is read.
 """
 
@@ -20,6 +26,8 @@ import numpy as np
 from games import GAME, GAMES, half_video_blocks, require, source_frames
 
 from . import learned
+from . import sequence
+from . import viterbi as vt
 from .pipeline import write_validated_submission
 from .tracking import load_tracking
 
@@ -29,6 +37,7 @@ def main(argv=None):
     parser.add_argument("--model", required=True)
     parser.add_argument("--data-dir", help="bundle root; defaults to games.DATA_DIR")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--sequence-model", help="bigru JSON to blend with --model (equal weights)")
     parser.add_argument("--frames", type=int, default=source_frames("tactical"))
     args = parser.parse_args(argv)
     try:
@@ -42,8 +51,24 @@ def main(argv=None):
         features = learned.model_inputs(
             model, tracking.ball_xy_m, tracking.player_xy_m, tracking.teams, fps=tracking.fps,
             pitch=tracking.pitch, halves=[(0, second_half), (second_half, args.frames)])
-        labels = learned.decode(model, features, scale=model["scale"], switch_cost=model["switch_cost"],
-                                dead_switch_cost=model["dead_switch_cost"])
+        if args.sequence_model:
+            seq = sequence.load(args.sequence_model)
+            halves = [(0, second_half), (second_half, args.frames)]
+            base, names = learned.frame_features(tracking.ball_xy_m, tracking.player_xy_m, tracking.teams,
+                                                 fps=tracking.fps, pitch=tracking.pitch, halves=halves,
+                                                 config=model["viterbi_config"])
+            extra, extra_names = learned.control_features(tracking.ball_xy_m, tracking.player_xy_m, tracking.teams,
+                                                          fps=tracking.fps)
+            if names + extra_names != seq["names"]:
+                raise ValueError("sequence model feature columns differ")
+            log_p = sequence.blend_log_probs(learned.log_probs(model, features),
+                                             sequence.log_probs(seq, np.c_[base, extra].astype(np.float32)))
+            prior = (np.asarray(model["prior"]) + seq["prior"]) / 2
+            scores = model["scale"] * (log_p - np.log(prior))
+            labels = np.asarray(vt.STATES)[vt._viterbi(scores, model["switch_cost"], model["dead_switch_cost"])]
+        else:
+            labels = learned.decode(model, features, scale=model["scale"], switch_cost=model["switch_cost"],
+                                    dead_switch_cost=model["dead_switch_cost"])
         write_validated_submission(args.output, labels, n_frames=args.frames)
         print("Official CSV format validation passed for {} rows.".format(args.frames))
         print(json.dumps({state: int(np.sum(labels == state)) for state in ("H", "A", "D")}))

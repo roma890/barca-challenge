@@ -1,0 +1,6 @@
+# Only needed to RETRAIN the bidirectional GRU (python -m possession.train_sequence).
+# Regenerating the submission needs only requirements.txt: the trained weights are committed and
+# inference is numpy. CPU build, e.g.:
+#   pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-training.txt
+-r requirements.txt
+torch==2.5.1
