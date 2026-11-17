@@ -187,9 +187,9 @@ training frames (+0.003); a hand-written decoder rule forbidding stoppages durin
 | Dead-ball switch cost | 7.0 | introduced with learned_v1 on the external Metrica sample games and kept since; on held-out IDSSE spellF1 is flat from 3.5 to 14 |
 | Team switch cost, score scale | 1.0, 0.15 | chosen on held-out IDSSE when learned_v3 was built (earlier models used 2.0 / 0.2 on the external Metrica sample games); ±50% changes move spellF1 by at most ±0.009 |
 | Frame ensemble size, context | 5 networks of 128 units, ±2 s | chosen on held-out external data during learned_v2/v3 (+0.013 for the finer context and 128 units) |
-| Short-possession weighting | under 3 s, 3× | chosen in advance and tested once; no other values were tried |
-| GRU design | 64 units, 2 layers, 12.5 fps, 8 epochs, 48 s crops, Adam 2e-3 | chosen before its first run; no other designs were tried |
-| Blend | equal weights | chosen in advance; no other weights were tried |
+| Short-possession weighting | under 3 s, 3× | picked as a reasonable starting value before testing; not adjusted afterwards |
+| GRU design | 64 units, 2 layers, 12.5 fps, 8 epochs, 48 s crops, Adam 2e-3 | picked as a reasonable starting design before testing; not adjusted afterwards |
+| Blend | equal weights | picked as a reasonable default before testing; not adjusted afterwards |
 | Stoppage-ball simulation | collect 1-4 s, pass 6-14 m/s, 25% of stoppages hidden, still ball hidden after 1 s | typical values we set by hand from general football knowledge (not measured from any data), fixed before any model was scored |
 | Degradation levels | section 5 table | label-free match-wide statistics of the provided tracking; live dropouts from the external Metrica sample games |
 | Feature constants | 1 m, 3 m, 1 s, 1.3 m/s, 12 m/s | physical choices; halving or doubling changes held-out external (IDSSE) spellF1 by at most ±0.005 |
